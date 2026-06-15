@@ -1,15 +1,42 @@
-# Python
+# --- Python Specific ---
 __pycache__/
 *.py[cod]
+*$py.class
+.pytest_cache/
+
+# --- Environment & Virtual Environments ---
 .venv/
 venv/
-
-# Environment / secrets
+ENV/
+env/
 .env
+.env.*
 
-# Database
-database/voice_chatbot.db
-
-# Generated/recorded audio (keep the directory, ignore its contents)
-assets/*
+# --- Project Assets (Voice chatbot recordings) ---
+# Prevents user and bot generated audio files from being pushed to GitHub
+assets/*.wav
+assets/*.mp3
 !assets/.gitkeep
+
+# --- Databases ---
+# Keeps your chat history SQLite database safe and blocked from version control
+database/*.db
+database/*.sqlite
+database/*.sqlite3
+
+# --- IDEs and Editors ---
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# --- OS Specific ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Streamlit ---
+.streamlit/config.toml
