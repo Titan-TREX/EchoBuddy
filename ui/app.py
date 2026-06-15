@@ -42,9 +42,10 @@ def _init_session_state() -> None:
     if "session_id" not in st.session_state:
         st.session_state.session_id = str(uuid.uuid4())
     if "messages" not in st.session_state:
-        # Each entry: {"role": "user"|"assistant", "text": str,
-        #               "audio_path": str | None, "autoplay": bool}
         st.session_state.messages = []
+    # Track the last processed audio to prevent infinite rerun loops
+    if "last_processed_audio" not in st.session_state:
+        st.session_state.last_processed_audio = None
 
 
 def _save_recording(audio_value) -> str:
@@ -103,33 +104,41 @@ def main() -> None:
 
     audio_value = st.audio_input("Press to record your message")
 
+    # Check if audio exists AND is different from the previously processed audio clip
     if audio_value is not None:
-        audio_path = _save_recording(audio_value)
+        # Use a unique identifier to confirm this is a brand-new recording instance
+        audio_id = audio_value.id if hasattr(audio_value, 'id') else audio_value.getvalue()
+        
+        if st.session_state.last_processed_audio != audio_id:
+            audio_path = _save_recording(audio_value)
 
-        with st.spinner("Thinking..."):
-            try:
-                result = asyncio.run(_run_workflow(audio_path))
-            except Exception as exc:  # noqa: BLE001 - surface any pipeline failure to the user
-                st.error(f"Workflow failed: {exc}")
-                return
+            with st.spinner("Thinking..."):
+                try:
+                    result = asyncio.run(_run_workflow(audio_path))
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Workflow failed: {exc}")
+                    return
 
-        st.session_state.messages.append(
-            {
-                "role": "user",
-                "text": result.user_text,
-                "audio_path": audio_path,
-                "autoplay": False,
-            }
-        )
-        st.session_state.messages.append(
-            {
-                "role": "assistant",
-                "text": result.bot_text,
-                "audio_path": result.bot_audio_path,
-                "autoplay": True,
-            }
-        )
-        st.rerun()
+            st.session_state.messages.append(
+                {
+                    "role": "user",
+                    "text": result.user_text,
+                    "audio_path": audio_path,
+                    "autoplay": False,
+                }
+            )
+            st.session_state.messages.append(
+                {
+                    "role": "assistant",
+                    "text": result.bot_text,
+                    "audio_path": result.bot_audio_path,
+                    "autoplay": True,
+                }
+            )
+            
+            # Mark this audio instance as 'processed' after executing the workflow
+            st.session_state.last_processed_audio = audio_id
+            st.rerun()
 
 
 if __name__ == "__main__":

@@ -30,7 +30,7 @@ class Settings(BaseSettings):
 
     # --- Third-party API credentials ---------------------------------------------------
     deepgram_api_key: str = "REMOVED-LEAKED-DEEPGRAM-KEY"
-    gemini_api_key: str = ""
+    gemini_api_key: str = "REMOVED-LEAKED-GROQ-KEY"
     cartesia_api_key: str = "REMOVED-LEAKED-CARTESIA-KEY"
 
     # --- Deepgram (Speech-to-Text) ------------------------------------------------------
@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     deepgram_language: str = "en"
 
     # --- Gemini (LLM "brain") -----------------------------------------------------------
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "llama-3.3-70b-versatile"  
     gemini_system_prompt: str = (
         "You are a friendly, concise voice assistant. Keep replies short, "
         "natural, and conversational, since they will be converted to "

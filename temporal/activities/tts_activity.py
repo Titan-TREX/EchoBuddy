@@ -41,7 +41,9 @@ async def synthesize_speech(text: str) -> SpeechResult:
     client = AsyncCartesia(api_key=settings.cartesia_api_key)
     try:
         audio_chunks: list[bytes] = []
-        async for chunk in client.tts.bytes(
+        
+        # Step 1: Await the function call to get the async_generator
+        audio_generator = await client.tts.bytes(
             model_id=settings.cartesia_model,
             transcript=text,
             voice={"mode": "id", "id": settings.cartesia_voice_id},
@@ -51,11 +53,22 @@ async def synthesize_speech(text: str) -> SpeechResult:
                 "sample_rate": settings.cartesia_output_sample_rate,
                 "bit_rate": settings.cartesia_output_bit_rate,
             },
-        ):
-            audio_chunks.append(chunk)
+        )
+        
+        # Step 2: Iterate over the generator using an async for loop to collect chunks
+        async for chunk in audio_generator:
+            # Safe checking: Handle cases whether the chunk is a dictionary or direct bytes
+            if isinstance(chunk, dict) and "audio" in chunk:
+                audio_chunks.append(chunk["audio"])
+            elif isinstance(chunk, bytes):
+                audio_chunks.append(chunk)
+            else:
+                audio_chunks.append(chunk)
+
     finally:
         await client.close()
 
+    # Join all chunks together and write them to the file
     output_path.write_bytes(b"".join(audio_chunks))
 
     relative_path = output_path.relative_to(settings.base_dir).as_posix()
