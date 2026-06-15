@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Environment / secrets
+.env
+
+# Database
+database/voice_chatbot.db
+
+# Generated/recorded audio (keep the directory, ignore its contents)
+assets/*
+!assets/.gitkeep

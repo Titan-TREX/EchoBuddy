@@ -1,93 +1,148 @@
-# EchoBuddy
+# Voice-to-Voice AI Chatbot
 
+A fault-tolerant, low-latency voice chatbot built on **Temporal.io**, with
+**Deepgram** for speech-to-text, **Gemini** for the conversational brain,
+**Cartesia** for text-to-speech, and a **Streamlit** front end.
 
-
-## Getting started
-
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
-
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
-
-## Add your files
-
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+## Architecture
 
 ```
-cd existing_repo
-git remote add origin https://gitlab.com/Ali9297/echobuddy.git
-git branch -M main
-git push -uf origin main
+voice_chatbot_system/
+├── config/                  # Environment-driven settings (config/settings.py)
+├── ui/                       # Presentation layer - Streamlit app + Temporal client
+├── temporal/                 # Orchestration layer
+│   ├── workflows.py          # VoiceChatbotWorkflow - sequencing only, no I/O
+│   ├── dto.py                # Shared dataclasses crossing workflow/activity boundaries
+│   ├── worker.py             # Worker process (registers workflow + activities)
+│   └── activities/           # Execution layer - one external dependency per file
+│       ├── stt_activity.py   # Deepgram (speech-to-text)
+│       ├── llm_activity.py   # Gemini (conversational brain)
+│       ├── tts_activity.py   # Cartesia (text-to-speech)
+│       └── db_activity.py    # SQLite persistence
+├── database/                 # Infrastructure layer
+│   ├── connection.py         # async SQLite connection helper
+│   └── schema.sql            # users / sessions / messages (3NF, FK constraints)
+├── assets/                    # Recorded + generated audio (.wav/.mp3), UUID filenames
+├── requirements.txt
+└── .env.example
 ```
 
-## Integrate with your tools
+### Pipeline (one voice turn)
 
-* [Set up project integrations](https://gitlab.com/Ali9297/echobuddy/-/settings/integrations)
+```
+Streamlit records audio (.wav)
+  -> save to assets/usr_<uuid>.wav
+  -> start VoiceChatbotWorkflow on task queue "voice-bot-queue"
+       1. transcribe_audio        (Deepgram Nova-2)
+       2. ensure_user_and_session (SQLite, idempotent)
+       3. log_message (role=user) (SQLite)
+       4. fetch_recent_history     (SQLite)
+       5. generate_reply           (Gemini)
+       6. synthesize_speech        (Cartesia -> assets/bot_<uuid>.mp3)
+       7. log_message (role=assistant) (SQLite)
+  -> workflow returns transcript + bot reply + bot audio path
+  -> Streamlit renders the transcript and autoplays the reply
+```
 
-## Collaborate with your team
+Every activity has an explicit `start_to_close_timeout` and a shared
+exponential-backoff `RetryPolicy` (configured in `temporal/workflows.py`), so
+transient socket errors, rate limits, or dropped connections to Deepgram,
+Gemini, or Cartesia are retried automatically without crashing the workflow.
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+## Prerequisites
 
-## Test and Deploy
+- Python 3.11+
+- A running Temporal server. The quickest option for local development is
+  the Temporal CLI's dev server:
 
-Use the built-in continuous integration in GitLab.
+  ```bash
+  temporal server start-dev
+  ```
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+  This starts a local server at `localhost:7233` and a Web UI at
+  `http://localhost:8233`.
 
-***
+- API keys for [Deepgram](https://console.deepgram.com/), the
+  [Gemini API](https://ai.google.dev/), and [Cartesia](https://play.cartesia.ai/).
 
-# Editing this README
+## Setup
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+```bash
+# 1. Create and activate a virtual environment
+python3 -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 
-## Suggestions for a good README
+# 2. Install dependencies
+pip install -r requirements.txt
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+# 3. Configure credentials
+cp .env.example .env
+# then edit .env and fill in DEEPGRAM_API_KEY, GEMINI_API_KEY, CARTESIA_API_KEY
+```
 
-## Name
-Choose a self-explaining name for your project.
+The SQLite database is created automatically (from `database/schema.sql`) the
+first time any activity runs - no manual migration step is needed.
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+## Running the app
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+You need **three** processes running concurrently (in separate terminals),
+from the project root:
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+```bash
+# Terminal 1: Temporal dev server
+temporal server start-dev
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+# Terminal 2: Temporal worker (executes activities)
+python -m temporal.worker
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+# Terminal 3: Streamlit UI
+streamlit run ui/app.py
+```
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+Open the Streamlit URL printed in Terminal 3, click the microphone to record
+a message, and wait for the assistant's spoken reply to autoplay.
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+You can inspect workflow executions, retries, and failures in the Temporal
+Web UI at `http://localhost:8233`.
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+## Configuration reference
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+All configuration lives in `config/settings.py` and can be overridden via
+environment variables or a `.env` file (see `.env.example`):
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DEEPGRAM_API_KEY` | _(required)_ | Deepgram API key |
+| `GEMINI_API_KEY` | _(required)_ | Gemini API key |
+| `CARTESIA_API_KEY` | _(required)_ | Cartesia API key |
+| `DEEPGRAM_MODEL` | `nova-2` | Deepgram STT model |
+| `GEMINI_MODEL` | `gemini-2.5-flash` | Gemini model used for replies |
+| `GEMINI_MAX_HISTORY_TURNS` | `10` | Rolling context window size |
+| `CARTESIA_MODEL` | `sonic-2` | Cartesia TTS model |
+| `CARTESIA_VOICE_ID` | (default Cartesia voice) | Voice used for replies |
+| `TEMPORAL_ADDRESS` | `localhost:7233` | Temporal server address |
+| `TEMPORAL_TASK_QUEUE` | `voice-bot-queue` | Task queue shared by worker + client |
+| `ACTIVITY_START_TO_CLOSE_TIMEOUT_SECONDS` | `60` | Per-activity timeout |
+| `ACTIVITY_RETRY_MAX_ATTEMPTS` | `4` | Max attempts before an activity failure surfaces |
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+## Notes on third-party SDKs
 
-## License
-For open source projects, say how it is licensed.
+The Deepgram, Gemini, and Cartesia Python SDKs are under active development
+and occasionally change their async client APIs between major versions. The
+code in `temporal/activities/` was written against the SDK versions pinned in
+`requirements.txt`. If you upgrade a dependency and see `AttributeError`s
+from an SDK call, check that provider's current Python SDK docs/changelog for
+the matching method names.
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+## Database schema
+
+`database/schema.sql` defines a 3-tier normalized layout:
+
+- `users (id, username, created_at)`
+- `sessions (id, user_id -> users.id, started_at, ended_at)`
+- `messages (id, session_id -> sessions.id, role, content, audio_path, created_at)`
+  - Indexed on `session_id` (and `(session_id, created_at)`) for fast history lookups.
+
+Audio is never stored in the database - `messages.audio_path` holds a path
+relative to the project root (e.g. `assets/bot_f2e4c1.mp3`), and the binary
+lives on disk under `assets/`.

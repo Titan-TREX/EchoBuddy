@@ -1,0 +1,15 @@
+services:
+  temporal-server:
+    image: temporalio/admin-tools:latest
+    container_name: echobuddy-temporal
+    command: ["temporal", "server", "start-dev", "--ip", "0.0.0.0"]
+    ports:
+      - "7233:7233"   # Temporal Server Port
+      - "8233:8233"   # Temporal Web UI Port
+    volumes:
+      - temporal_data:/var/lib/temporal
+    environment:
+      - DB=sqlite
+
+volumes:
+  temporal_data:
