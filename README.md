@@ -4,6 +4,15 @@ A fault-tolerant, low-latency voice chatbot built on **Temporal.io**, with
 **Deepgram** for speech-to-text, **Gemini** for the conversational brain,
 **Cartesia** for text-to-speech, and a **Streamlit** front end.
 
+# Running the app
+You need to ensure your Temporal container is running, and then execute two python processes concurrently (in separate terminals), from the project root:
+
+Bash
+# Terminal 1: Temporal Worker process (executes activities)
+uv run python -m temporal.worker
+
+# Terminal 2: Streamlit UI
+streamlit run ui/app.py
 ## Architecture
 
 ```
