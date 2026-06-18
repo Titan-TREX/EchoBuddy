@@ -17,6 +17,8 @@ dependencies = [
     "pydantic-settings==2.14.1",
     "python-dotenv==1.2.2",
     "groq>=1.4.0",
+    "pytest>=9.1.0",
+    "pytest-asyncio>=1.4.0",
 ]
 
 [build-system]

@@ -33,7 +33,7 @@ voice_chatbot_system/
 │   └── schema.sql            # users / sessions / messages (3NF, FK constraints)
 ├── assets/                    # Recorded + generated audio (.wav/.mp3), UUID filenames
 ├── requirements.txt
-└── .env.example
+└── .env
 ```
 
 ### Pipeline (one voice turn)
