@@ -1,0 +1,1 @@
+"""Real-time, low-latency voice pipeline (FastAPI + WebSocket), additive to the Temporal batch pipeline."""

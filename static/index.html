@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>EchoBuddy — Live Mode</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 48px auto; padding: 0 16px; color: #1f1f1f; }
+  h1 { font-size: 1.4rem; }
+  #orb { width: 56px; height: 56px; border-radius: 50%; background: #ccc; margin-bottom: 12px; transition: background 0.2s ease; }
+  #orb.listening { background: #34a853; }
+  #orb.speaking { background: #1a73e8; }
+  #orb.thinking { background: #fbbc04; }
+  #status { font-weight: 600; margin-bottom: 20px; color: #555; }
+  #transcript { white-space: pre-wrap; line-height: 1.6; font-size: 0.95rem; }
+  .user { color: #1a73e8; margin-bottom: 4px; }
+  .bot { color: #188038; margin-bottom: 4px; }
+  .hint { color: #888; font-size: 0.85rem; margin-top: 24px; }
+</style>
+</head>
+<body>
+  <h1>🎙️ EchoBuddy — Live Mode</h1>
+  <button id="startBtn" style="padding: 10px 20px; font-size: 1rem; cursor: pointer;">Start</button>
+  <div id="orb" style="margin-top: 16px;"></div>
+  <div id="status">Click Start to begin</div>
+  <div id="transcript"></div>
+  <div class="hint">Headphones recommended — without them the mic may pick up the bot's own voice from your speakers.</div>
+
+<script>
+const statusEl = document.getElementById("status");
+const transcriptEl = document.getElementById("transcript");
+const orbEl = document.getElementById("orb");
+
+const PLAYBACK_SAMPLE_RATE = 16000; // must match TTS_SAMPLE_RATE in realtime/tts_stream.py
+
+let audioCtx, micStream, processor, source, ws;
+let playTime = 0;
+let activeSources = [];
+let pendingBotLine = null; // accumulates bot_text_chunk spans into one growing line
+
+function setStatus(text, orbClass) {
+  statusEl.textContent = text;
+  orbEl.className = orbClass || "";
+}
+
+function startBotLine() {
+  pendingBotLine = document.createElement("div");
+  pendingBotLine.className = "bot";
+  pendingBotLine.textContent = "Bot: ";
+  transcriptEl.appendChild(pendingBotLine);
+}
+
+function appendUserLine(text) {
+  const div = document.createElement("div");
+  div.className = "user";
+  div.textContent = "You: " + text;
+  transcriptEl.appendChild(div);
+  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
+function appendBotChunk(text) {
+  if (!pendingBotLine) startBotLine();
+  pendingBotLine.textContent += text + " ";
+  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
+function stopPlayback() {
+  activeSources.forEach((src) => { try { src.stop(); } catch (e) {} });
+  activeSources = [];
+  playTime = audioCtx ? audioCtx.currentTime : 0;
+}
+
+function playPcm16Chunk(arrayBuffer) {
+  console.log("Received audio chunk:", arrayBuffer.byteLength, "bytes | AudioContext state:", audioCtx.state);
+  const int16 = new Int16Array(arrayBuffer);
+  const float32 = new Float32Array(int16.length);
+  for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
+
+  const buffer = audioCtx.createBuffer(1, float32.length, PLAYBACK_SAMPLE_RATE);
+  buffer.copyToChannel(float32, 0);
+
+  const src = audioCtx.createBufferSource();
+  src.buffer = buffer;
+  src.connect(audioCtx.destination);
+
+  const now = audioCtx.currentTime;
+  if (playTime < now) playTime = now; // catch up if we fell behind
+  src.start(playTime);
+  playTime += buffer.duration;
+
+  activeSources.push(src);
+  src.onended = () => { activeSources = activeSources.filter((s) => s !== src); };
+}
+
+function handleControlMessage(msg) {
+  switch (msg.type) {
+    case "ready":
+      setStatus("Listening…", "listening");
+      break;
+    case "listening_stopped":
+      setStatus("Thinking…", "thinking");
+      break;
+    case "user_transcript":
+      appendUserLine(msg.text);
+      break;
+    case "bot_speaking_start":
+      setStatus("Speaking…", "speaking");
+      startBotLine();
+      break;
+    case "bot_text_chunk":
+      appendBotChunk(msg.text);
+      break;
+    case "bot_speaking_end":
+      setStatus("Listening…", "listening");
+      pendingBotLine = null;
+      break;
+    case "barge_in":
+      stopPlayback();
+      setStatus("Listening… (interrupted)", "listening");
+      pendingBotLine = null;
+      break;
+    case "no_speech":
+      setStatus("Listening…", "listening");
+      pendingBotLine = null;
+      break;
+    case "error":
+      setStatus("Error: " + msg.message, "");
+      break;
+  }
+}
+
+async function start() {
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  await audioCtx.resume(); // explicit resume, in case the browser created it suspended
+  console.log("AudioContext state after resume:", audioCtx.state);
+
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true },
+  });
+
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.binaryType = "arraybuffer";
+
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ type: "start", sampleRate: audioCtx.sampleRate }));
+  };
+
+  ws.onmessage = (event) => {
+    if (typeof event.data === "string") {
+      handleControlMessage(JSON.parse(event.data));
+    } else {
+      playPcm16Chunk(event.data);
+    }
+  };
+
+  ws.onclose = () => setStatus("Disconnected — refresh to reconnect.", "");
+  ws.onerror = () => setStatus("Connection error.", "");
+
+  // ScriptProcessorNode is deprecated but is the simplest reliable way to
+  // get raw mic samples in every major browser without a separate worklet
+  // file. Fine for a project of this size; AudioWorklet is the
+  // forward-looking replacement if you want to modernize this later.
+  source = audioCtx.createMediaStreamSource(micStream);
+  processor = audioCtx.createScriptProcessor(4096, 1, 1);
+  source.connect(processor);
+  processor.connect(audioCtx.destination); // required by some browsers to keep the node ticking; we never write to the output buffer, so this stays silent
+
+  processor.onaudioprocess = (e) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const input = e.inputBuffer.getChannelData(0);
+    const int16 = new Int16Array(input.length);
+    for (let i = 0; i < input.length; i++) {
+      const s = Math.max(-1, Math.min(1, input[i]));
+      int16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    ws.send(int16.buffer);
+  };
+
+  setStatus("Listening…", "listening");
+}
+
+document.getElementById("startBtn").addEventListener("click", () => {
+  document.getElementById("startBtn").disabled = true;
+  document.getElementById("startBtn").textContent = "Running…";
+  start().catch((err) => setStatus("Mic error: " + err.message, ""));
+});
+</script>
+</body>
+</html>
