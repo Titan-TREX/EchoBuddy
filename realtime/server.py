@@ -1,17 +1,25 @@
 """
-FastAPI + WebSocket server for the real-time, interruptible voice pipeline.
+FastAPI server hosting BOTH voice pipelines behind a single UI.
 
-This is additive: it lives alongside the existing Temporal + Streamlit
-system in `ui/` and `temporal/` without modifying either. Run whichever one
-you want to demo - they don't conflict (different ports, separate
-processes), though both can write to the same `database/voice_chatbot.db`
-and `assets/` since they share `config/settings.py`.
+  * `POST /api/voice-chat` - batch pipeline. Accepts one recorded audio
+    clip, runs it through `VoiceChatbotWorkflow` on Temporal (Deepgram ->
+    Groq -> Cartesia), and returns the full turn as JSON once it's done.
+    Mirrors what `ui/app.py` (Streamlit) used to do, minus Streamlit.
+
+  * `WS /ws` - realtime pipeline. Unchanged from before: continuous
+    mic streaming, server-side VAD turn-taking, streamed text + PCM16
+    audio chunks. See `realtime/session.py`.
+
+Both pipelines share `config/settings.py`, the same SQLite database, and
+the same `assets/` directory for audio files - they can run side by side
+safely. The Temporal pipeline additionally requires a Temporal server
+(Dockerized) and a running `temporal/worker.py` process; the realtime
+pipeline needs neither.
 
 Run:
     uv run uvicorn realtime.server:app --reload --port 8000
 
-Then open http://localhost:8000 - no Temporal server or worker needed for
-this path.
+Then open http://localhost:8000
 """
 
 from __future__ import annotations
@@ -22,15 +30,19 @@ import sys
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from temporalio.client import Client
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.append(str(_PROJECT_ROOT))
 
+from config.settings import settings  # noqa: E402
 from realtime.session import VoiceSession  # noqa: E402
+from temporal.dto import VoiceChatbotInput, VoiceChatbotResult  # noqa: E402
+from temporal.workflows import VoiceChatbotWorkflow  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -40,10 +52,82 @@ app = FastAPI()
 _STATIC_DIR = _PROJECT_ROOT / "static"
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
+# Recorded user clips and synthesized bot replies (both pipelines) live
+# under settings.assets_dir. Mounting it means the browser can <audio src>
+# a bot_audio_path returned by either /api/voice-chat or the workflow
+# directly, with no extra download route.
+app.mount("/assets", StaticFiles(directory=str(settings.assets_dir)), name="assets")
+
+# One Temporal client, reused across requests instead of reconnecting per
+# call. Created lazily on first use and cached here.
+_temporal_client: Client | None = None
+
+
+async def _get_temporal_client() -> Client:
+    global _temporal_client
+    if _temporal_client is None:
+        _temporal_client = await Client.connect(
+            settings.temporal_address,
+            namespace=settings.temporal_namespace,
+        )
+    return _temporal_client
+
 
 @app.get("/")
 async def index() -> FileResponse:
     return FileResponse(str(_STATIC_DIR / "index.html"))
+
+
+@app.post("/api/voice-chat")
+async def voice_chat(
+    audio: UploadFile = File(...),
+    user_id: str = "",
+    session_id: str = "",
+) -> JSONResponse:
+    """Batch pipeline entrypoint: one recorded clip in, one full turn out.
+
+    The browser sends the clip recorded by `MediaRecorder` plus the
+    per-browser-tab `user_id`/`session_id` it's been holding onto, so every
+    turn in a tab lands in the same conversation history.
+    """
+    if not user_id:
+        user_id = f"user_{uuid.uuid4().hex[:8]}"
+    if not session_id:
+        session_id = str(uuid.uuid4())
+
+    suffix = Path(audio.filename or "").suffix or ".webm"
+    filename = f"usr_{uuid.uuid4().hex[:8]}{suffix}"
+    output_path = settings.assets_dir / filename
+    output_path.write_bytes(await audio.read())
+    relative_audio_path = output_path.relative_to(settings.base_dir).as_posix()
+
+    try:
+        client = await _get_temporal_client()
+        workflow_input = VoiceChatbotInput(
+            user_id=user_id,
+            session_id=session_id,
+            input_audio_path=relative_audio_path,
+        )
+        result: VoiceChatbotResult = await client.execute_workflow(
+            VoiceChatbotWorkflow.run,
+            workflow_input,
+            id=f"voice-chat-{uuid.uuid4()}",
+            task_queue=settings.temporal_task_queue,
+        )
+    except Exception:
+        logger.exception("Temporal workflow failed for session=%s", session_id)
+        raise HTTPException(status_code=502, detail="Voice chat workflow failed.")
+
+    return JSONResponse(
+        {
+            "user_id": user_id,
+            "session_id": session_id,
+            "user_text": result.user_text,
+            "bot_text": result.bot_text,
+            "bot_audio_path": f"/{result.bot_audio_path}",
+            "user_audio_path": f"/{relative_audio_path}",
+        }
+    )
 
 
 @app.websocket("/ws")

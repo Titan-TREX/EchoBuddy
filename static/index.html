@@ -2,66 +2,440 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>EchoBuddy — Live Mode</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>EchoBuddy</title>
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 48px auto; padding: 0 16px; color: #1f1f1f; }
-  h1 { font-size: 1.4rem; }
-  #orb { width: 56px; height: 56px; border-radius: 50%; background: #ccc; margin-bottom: 12px; transition: background 0.2s ease; }
-  #orb.listening { background: #34a853; }
-  #orb.speaking { background: #1a73e8; }
-  #orb.thinking { background: #fbbc04; }
-  #status { font-weight: 600; margin-bottom: 20px; color: #555; }
-  #transcript { white-space: pre-wrap; line-height: 1.6; font-size: 0.95rem; }
-  .user { color: #1a73e8; margin-bottom: 4px; }
-  .bot { color: #188038; margin-bottom: 4px; }
-  .hint { color: #888; font-size: 0.85rem; margin-top: 24px; }
+  :root {
+    --bg: #0f0f0f;
+    --panel: #1e1e1e;
+    --panel-2: #2a2a2a;
+    --border: #313131;
+    --text: #ececec;
+    --text-dim: #9b9b9b;
+    --accent: #ffffff;
+    --user-bubble: #2f2f2f;
+    --green: #34a853;
+    --blue: #1a73e8;
+    --amber: #fbbc04;
+    --red: #e25555;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ---------- top bar ---------- */
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 20px;
+    flex-shrink: 0;
+  }
+  .topbar .title {
+    font-weight: 600;
+    font-size: 1rem;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .mode-pill {
+    font-size: 0.7rem;
+    padding: 3px 9px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+  }
+
+  /* ---------- chat area ---------- */
+  .chat-wrap {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    justify-content: center;
+  }
+  .chat-inner {
+    width: 100%;
+    max-width: 720px;
+    padding: 24px 20px 140px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+
+  .empty-state {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 50vh;
+    text-align: center;
+    color: var(--text-dim);
+  }
+  .empty-state h1 {
+    color: var(--text);
+    font-size: 1.8rem;
+    font-weight: 600;
+    margin: 0 0 8px;
+  }
+  .empty-state p { margin: 0; font-size: 0.95rem; }
+
+  .bubble-row { display: flex; }
+  .bubble-row.user { justify-content: flex-end; }
+  .bubble-row.bot { justify-content: flex-start; }
+
+  .bubble {
+    max-width: 80%;
+    padding: 10px 16px;
+    border-radius: 18px;
+    line-height: 1.5;
+    font-size: 0.95rem;
+    white-space: pre-wrap;
+  }
+  .bubble.user { background: var(--user-bubble); border-radius: 18px 18px 4px 18px; }
+  .bubble.bot { background: transparent; padding: 10px 0; border-radius: 0; }
+
+  .bubble audio { margin-top: 8px; height: 32px; width: 220px; }
+
+  .turn-meta {
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    margin-top: 4px;
+  }
+
+  /* live transcript line while bot is streaming in realtime mode */
+  .bubble.bot.streaming::after {
+    content: "▍";
+    animation: blink 1s steps(1) infinite;
+    color: var(--text-dim);
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* ---------- composer ---------- */
+  .composer-wrap {
+    position: sticky;
+    bottom: 0;
+    display: flex;
+    justify-content: center;
+    padding: 0 20px 22px;
+    background: linear-gradient(to top, var(--bg) 60%, transparent);
+    flex-shrink: 0;
+  }
+  .composer {
+    width: 100%;
+    max-width: 720px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .status-line {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.82rem;
+    color: var(--text-dim);
+    padding-left: 6px;
+    min-height: 18px;
+  }
+  .orb {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--border);
+    transition: background 0.2s ease, box-shadow 0.2s ease;
+    flex-shrink: 0;
+  }
+  .orb.listening { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .orb.speaking  { background: var(--blue);  box-shadow: 0 0 8px var(--blue); }
+  .orb.thinking  { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
+  .orb.recording { background: var(--red);   box-shadow: 0 0 8px var(--red); animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: 0.4; } }
+
+  .input-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 28px;
+    padding: 8px 10px 8px 18px;
+  }
+  .input-bar input[type="text"] {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--text);
+    font-size: 0.95rem;
+  }
+  .input-bar input[type="text"]::placeholder { color: var(--text-dim); }
+
+  .icon-btn {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    border: none;
+    background: var(--panel-2);
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background 0.15s ease, transform 0.1s ease;
+  }
+  .icon-btn:hover { background: #3a3a3a; }
+  .icon-btn:active { transform: scale(0.94); }
+  .icon-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .icon-btn svg { width: 18px; height: 18px; }
+
+  .icon-btn.mic.recording {
+    background: var(--red);
+  }
+  .icon-btn.mic.recording:hover { background: #c94444; }
+
+  .icon-btn.realtime.active {
+    background: var(--green);
+  }
+  .icon-btn.realtime.active:hover { background: #2c9247; }
+
+  .hint {
+    text-align: center;
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    margin-top: 2px;
+  }
 </style>
 </head>
 <body>
-  <h1>🎙️ EchoBuddy — Live Mode</h1>
-  <button id="startBtn" style="padding: 10px 20px; font-size: 1rem; cursor: pointer;">Start</button>
-  <div id="orb" style="margin-top: 16px;"></div>
-  <div id="status">Click Start to begin</div>
-  <div id="transcript"></div>
-  <div class="hint">Headphones recommended — without them the mic may pick up the bot's own voice from your speakers.</div>
+
+<div class="topbar">
+  <div class="title">
+    🎙️ EchoBuddy
+    <span class="mode-pill" id="modePill">Idle</span>
+  </div>
+</div>
+
+<div class="chat-wrap">
+  <div class="chat-inner" id="chatInner">
+    <div class="empty-state" id="emptyState">
+      <h1>What can I help with?</h1>
+      <p>Tap the mic to record a message, or tap the waveform for live voice mode.</p>
+    </div>
+  </div>
+</div>
+
+<div class="composer-wrap">
+  <div class="composer">
+    <div class="status-line">
+      <div class="orb" id="orb"></div>
+      <span id="statusText">Ready</span>
+    </div>
+
+    <div class="input-bar">
+      <input type="text" id="textInput" placeholder="Ask anything" disabled />
+
+      <!-- Mic: click once to start recording, click again to stop + send (batch/Temporal pipeline) -->
+      <button class="icon-btn mic" id="micBtn" title="Record a message">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+          <line x1="12" y1="19" x2="12" y2="23"/>
+          <line x1="8" y1="23" x2="16" y2="23"/>
+        </svg>
+      </button>
+
+      <!-- Waveform: toggles always-on realtime WebSocket mode -->
+      <button class="icon-btn realtime" id="realtimeBtn" title="Live voice mode">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="3" y1="12" x2="3" y2="12"/>
+          <line x1="7" y1="8" x2="7" y2="16"/>
+          <line x1="11" y1="4" x2="11" y2="20"/>
+          <line x1="15" y1="9" x2="15" y2="15"/>
+          <line x1="19" y1="6" x2="19" y2="18"/>
+          <line x1="21" y1="11" x2="21" y2="13"/>
+        </svg>
+      </button>
+    </div>
+
+    <div class="hint" id="hint">Mic = record one message · Waveform = continuous live conversation</div>
+  </div>
+</div>
 
 <script>
-const statusEl = document.getElementById("status");
-const transcriptEl = document.getElementById("transcript");
-const orbEl = document.getElementById("orb");
+/* =========================================================================
+   Shared chat-rendering helpers
+   ========================================================================= */
+const chatInner   = document.getElementById("chatInner");
+const emptyState  = document.getElementById("emptyState");
+const orb         = document.getElementById("orb");
+const statusText  = document.getElementById("statusText");
+const modePill    = document.getElementById("modePill");
+const micBtn      = document.getElementById("micBtn");
+const realtimeBtn = document.getElementById("realtimeBtn");
+const hint        = document.getElementById("hint");
 
+function hideEmptyState() {
+  if (emptyState.parentNode) emptyState.remove();
+}
+
+function addUserBubble(text, audioUrl) {
+  hideEmptyState();
+  const row = document.createElement("div");
+  row.className = "bubble-row user";
+  const bubble = document.createElement("div");
+  bubble.className = "bubble user";
+  bubble.textContent = text;
+  if (audioUrl) {
+    const audio = document.createElement("audio");
+    audio.controls = true;
+    audio.src = audioUrl;
+    bubble.appendChild(document.createElement("br"));
+    bubble.appendChild(audio);
+  }
+  row.appendChild(bubble);
+  chatInner.appendChild(row);
+  scrollToBottom();
+  return bubble;
+}
+
+function addBotBubble({ streaming = false } = {}) {
+  hideEmptyState();
+  const row = document.createElement("div");
+  row.className = "bubble-row bot";
+  const bubble = document.createElement("div");
+  bubble.className = "bubble bot" + (streaming ? " streaming" : "");
+  row.appendChild(bubble);
+  chatInner.appendChild(row);
+  scrollToBottom();
+  return bubble;
+}
+
+function scrollToBottom() {
+  const wrap = chatInner.parentElement;
+  wrap.scrollTop = wrap.scrollHeight;
+}
+
+function setStatus(text, orbClass, pillText) {
+  statusText.textContent = text;
+  orb.className = "orb" + (orbClass ? " " + orbClass : "");
+  if (pillText) modePill.textContent = pillText;
+}
+
+/* =========================================================================
+   MODE 1 — Mic button: record-once, batch pipeline (Temporal workflow)
+   POST /api/voice-chat  ->  { user_text, bot_text, bot_audio_path, ... }
+   ========================================================================= */
+let mediaRecorder = null;
+let recordedChunks = [];
+let isRecording = false;
+
+// Stable per-tab identifiers so every turn lands in the same Temporal
+// conversation/session history.
+const tempUserId = "user_" + Math.random().toString(16).slice(2, 10);
+let tempSessionId = crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
+
+async function startRecording() {
+  if (realtimeActive) return; // don't allow both modes at once
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  recordedChunks = [];
+  mediaRecorder = new MediaRecorder(stream);
+
+  mediaRecorder.ondataavailable = (e) => {
+    if (e.data && e.data.size > 0) recordedChunks.push(e.data);
+  };
+
+  mediaRecorder.onstop = async () => {
+    stream.getTracks().forEach((t) => t.stop());
+    const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || "audio/webm" });
+    await sendRecording(blob);
+  };
+
+  mediaRecorder.start();
+  isRecording = true;
+  micBtn.classList.add("recording");
+  orb.classList.remove("listening", "speaking", "thinking");
+  setStatus("Recording… tap mic to stop and send", "recording", "Recording");
+  realtimeBtn.disabled = true;
+}
+
+function stopRecording() {
+  if (mediaRecorder && isRecording) {
+    mediaRecorder.stop();
+    isRecording = false;
+    micBtn.classList.remove("recording");
+    setStatus("Sending…", "thinking", "Processing");
+  }
+}
+
+async function sendRecording(blob) {
+  const userRow = addUserBubble("🎤 (voice message)");
+  micBtn.disabled = true;
+
+  try {
+    const form = new FormData();
+    form.append("audio", blob, "recording.webm");
+    form.append("user_id", tempUserId);
+    form.append("session_id", tempSessionId);
+
+    const res = await fetch("/api/voice-chat", { method: "POST", body: form });
+    if (!res.ok) throw new Error(`Server responded ${res.status}`);
+    const data = await res.json();
+
+    userRow.textContent = data.user_text || "(no speech detected)";
+    if (data.user_audio_path) {
+      const audio = document.createElement("audio");
+      audio.controls = true;
+      audio.src = data.user_audio_path;
+      userRow.appendChild(document.createElement("br"));
+      userRow.appendChild(audio);
+    }
+
+    const botBubble = addBotBubble();
+    botBubble.textContent = data.bot_text || "";
+    if (data.bot_audio_path) {
+      const audio = document.createElement("audio");
+      audio.controls = true;
+      audio.autoplay = true;
+      audio.src = data.bot_audio_path;
+      botBubble.appendChild(document.createElement("br"));
+      botBubble.appendChild(audio);
+    }
+    scrollToBottom();
+    setStatus("Ready", "", "Idle");
+  } catch (err) {
+    addBotBubble().textContent = "⚠️ " + err.message;
+    setStatus("Error sending recording", "", "Error");
+  } finally {
+    micBtn.disabled = false;
+    realtimeBtn.disabled = false;
+  }
+}
+
+micBtn.addEventListener("click", () => {
+  if (!isRecording) startRecording().catch((err) => setStatus("Mic error: " + err.message, "", "Error"));
+  else stopRecording();
+});
+
+/* =========================================================================
+   MODE 2 — Waveform button: continuous realtime pipeline (WebSocket /ws)
+   ========================================================================= */
 const PLAYBACK_SAMPLE_RATE = 16000; // must match TTS_SAMPLE_RATE in realtime/tts_stream.py
 
+let realtimeActive = false;
 let audioCtx, micStream, processor, source, ws;
 let playTime = 0;
 let activeSources = [];
-let pendingBotLine = null; // accumulates bot_text_chunk spans into one growing line
-
-function setStatus(text, orbClass) {
-  statusEl.textContent = text;
-  orbEl.className = orbClass || "";
-}
-
-function startBotLine() {
-  pendingBotLine = document.createElement("div");
-  pendingBotLine.className = "bot";
-  pendingBotLine.textContent = "Bot: ";
-  transcriptEl.appendChild(pendingBotLine);
-}
-
-function appendUserLine(text) {
-  const div = document.createElement("div");
-  div.className = "user";
-  div.textContent = "You: " + text;
-  transcriptEl.appendChild(div);
-  transcriptEl.scrollTop = transcriptEl.scrollHeight;
-}
-
-function appendBotChunk(text) {
-  if (!pendingBotLine) startBotLine();
-  pendingBotLine.textContent += text + " ";
-  transcriptEl.scrollTop = transcriptEl.scrollHeight;
-}
+let pendingBotLine = null;
 
 function stopPlayback() {
   activeSources.forEach((src) => { try { src.stop(); } catch (e) {} });
@@ -70,7 +444,6 @@ function stopPlayback() {
 }
 
 function playPcm16Chunk(arrayBuffer) {
-  console.log("Received audio chunk:", arrayBuffer.byteLength, "bytes | AudioContext state:", audioCtx.state);
   const int16 = new Int16Array(arrayBuffer);
   const float32 = new Float32Array(int16.length);
   for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
@@ -83,7 +456,7 @@ function playPcm16Chunk(arrayBuffer) {
   src.connect(audioCtx.destination);
 
   const now = audioCtx.currentTime;
-  if (playTime < now) playTime = now; // catch up if we fell behind
+  if (playTime < now) playTime = now;
   src.start(playTime);
   playTime += buffer.duration;
 
@@ -94,50 +467,53 @@ function playPcm16Chunk(arrayBuffer) {
 function handleControlMessage(msg) {
   switch (msg.type) {
     case "ready":
-      setStatus("Listening…", "listening");
+      setStatus("Listening…", "listening", "Live");
       break;
     case "listening_stopped":
-      setStatus("Thinking…", "thinking");
+      setStatus("Thinking…", "thinking", "Live");
       break;
     case "user_transcript":
-      appendUserLine(msg.text);
+      addUserBubble(msg.text);
       break;
     case "bot_speaking_start":
-      setStatus("Speaking…", "speaking");
-      startBotLine();
+      setStatus("Speaking…", "speaking", "Live");
+      pendingBotLine = addBotBubble({ streaming: true });
       break;
     case "bot_text_chunk":
-      appendBotChunk(msg.text);
+      if (!pendingBotLine) pendingBotLine = addBotBubble({ streaming: true });
+      pendingBotLine.textContent += (pendingBotLine.textContent ? " " : "") + msg.text;
+      scrollToBottom();
       break;
     case "bot_speaking_end":
-      setStatus("Listening…", "listening");
+      setStatus("Listening…", "listening", "Live");
+      if (pendingBotLine) pendingBotLine.classList.remove("streaming");
       pendingBotLine = null;
       break;
     case "barge_in":
       stopPlayback();
-      setStatus("Listening… (interrupted)", "listening");
+      setStatus("Listening… (interrupted)", "listening", "Live");
       pendingBotLine = null;
       break;
     case "no_speech":
-      setStatus("Listening…", "listening");
+      setStatus("Listening…", "listening", "Live");
       pendingBotLine = null;
       break;
     case "error":
-      setStatus("Error: " + msg.message, "");
+      setStatus("Error: " + msg.message, "", "Error");
       break;
   }
 }
 
-async function start() {
+async function startRealtime() {
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  await audioCtx.resume(); // explicit resume, in case the browser created it suspended
-  console.log("AudioContext state after resume:", audioCtx.state);
+  await audioCtx.resume();
 
   micStream = await navigator.mediaDevices.getUserMedia({
     audio: { echoCancellation: true, noiseSuppression: true },
   });
 
-  ws = new WebSocket(`ws://${location.host}/ws`);
+  const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(`${wsProtocol}//${location.host}/ws`);
   ws.binaryType = "arraybuffer";
 
   ws.onopen = () => {
@@ -145,24 +521,19 @@ async function start() {
   };
 
   ws.onmessage = (event) => {
-    if (typeof event.data === "string") {
-      handleControlMessage(JSON.parse(event.data));
-    } else {
-      playPcm16Chunk(event.data);
-    }
+    if (typeof event.data === "string") handleControlMessage(JSON.parse(event.data));
+    else playPcm16Chunk(event.data);
   };
 
-  ws.onclose = () => setStatus("Disconnected — refresh to reconnect.", "");
-  ws.onerror = () => setStatus("Connection error.", "");
+  ws.onclose = () => {
+    if (realtimeActive) stopRealtime();
+  };
+  ws.onerror = () => setStatus("Connection error.", "", "Error");
 
-  // ScriptProcessorNode is deprecated but is the simplest reliable way to
-  // get raw mic samples in every major browser without a separate worklet
-  // file. Fine for a project of this size; AudioWorklet is the
-  // forward-looking replacement if you want to modernize this later.
   source = audioCtx.createMediaStreamSource(micStream);
   processor = audioCtx.createScriptProcessor(4096, 1, 1);
   source.connect(processor);
-  processor.connect(audioCtx.destination); // required by some browsers to keep the node ticking; we never write to the output buffer, so this stays silent
+  processor.connect(audioCtx.destination);
 
   processor.onaudioprocess = (e) => {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -174,14 +545,43 @@ async function start() {
     }
     ws.send(int16.buffer);
   };
-
-  setStatus("Listening…", "listening");
 }
 
-document.getElementById("startBtn").addEventListener("click", () => {
-  document.getElementById("startBtn").disabled = true;
-  document.getElementById("startBtn").textContent = "Running…";
-  start().catch((err) => setStatus("Mic error: " + err.message, ""));
+function stopRealtime() {
+  realtimeActive = false;
+  realtimeBtn.classList.remove("active");
+  micBtn.disabled = false;
+  hint.textContent = "Mic = record one message · Waveform = continuous live conversation";
+
+  if (processor) { try { processor.disconnect(); } catch (e) {} }
+  if (source) { try { source.disconnect(); } catch (e) {} }
+  if (micStream) micStream.getTracks().forEach((t) => t.stop());
+  if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+  if (audioCtx) audioCtx.close();
+
+  stopPlayback();
+  pendingBotLine = null;
+  setStatus("Ready", "", "Idle");
+}
+
+realtimeBtn.addEventListener("click", async () => {
+  if (isRecording) return; // don't allow both modes at once
+  if (!realtimeActive) {
+    try {
+      realtimeActive = true;
+      realtimeBtn.classList.add("active");
+      micBtn.disabled = true;
+      hint.textContent = "Live mode active — tap the waveform again to end the call";
+      hideEmptyState();
+      setStatus("Connecting…", "thinking", "Live");
+      await startRealtime();
+    } catch (err) {
+      stopRealtime();
+      setStatus("Mic error: " + err.message, "", "Error");
+    }
+  } else {
+    stopRealtime();
+  }
 });
 </script>
 </body>
