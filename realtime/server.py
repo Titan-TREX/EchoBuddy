@@ -159,8 +159,10 @@ async def voice_ws(websocket: WebSocket) -> None:
         await send_json({"type": "ready"})
 
         while True:
-            message = await websocket.receive()
-
+            try:
+                message = await websocket.receive()
+            except RuntimeError:
+                break  # client disconnected mid-stream, exit cleanly
             if message.get("bytes") is not None:
                 raw = message["bytes"]
                 if source_rate != 16000:
