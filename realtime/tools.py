@@ -97,26 +97,6 @@ TOOL_SCHEMAS = [
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "wikipedia_summary",
-            "description": (
-                "Fetch a short summary of a topic from Wikipedia. "
-                "Good for definitions, brief bios, or quick factual overviews."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "topic": {
-                        "type": "string",
-                        "description": "The Wikipedia article title or topic to look up.",
-                    }
-                },
-                "required": ["topic"],
-            },
-        },
-    },
 ]
 
 
@@ -124,7 +104,7 @@ TOOL_SCHEMAS = [
 
 async def execute_web_search(query: str) -> str:
     try:
-        from duckduckgo_search import DDGS  # noqa: PLC0415
+        from ddgs import DDGS  # noqa: PLC0415
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=4))
         if not results:
@@ -187,22 +167,6 @@ async def execute_get_datetime() -> str:
     return now.strftime("Current UTC date and time: %A, %d %B %Y, %H:%M:%S UTC")
 
 
-async def execute_wikipedia_summary(topic: str) -> str:
-    try:
-        url = "https://en.wikipedia.org/api/rest_v1/page/summary/" + topic.replace(" ", "_")
-        async with httpx.AsyncClient(timeout=8) as client:
-            resp = await client.get(url, headers={"User-Agent": "EchoBuddy/1.0"})
-            if resp.status_code == 404:
-                return f"No Wikipedia article found for '{topic}'."
-            resp.raise_for_status()
-            data = resp.json()
-            extract = data.get("extract", "")
-            return extract[:600] if extract else "No summary available."
-    except Exception as exc:
-        logger.exception("wikipedia_summary failed")
-        return f"Wikipedia error: {exc}"
-
-
 # ── Dispatcher ───────────────────────────────────────────────────────────────
 
 EXECUTORS = {
@@ -210,7 +174,6 @@ EXECUTORS = {
     "get_weather":       lambda args: execute_get_weather(args["location"]),
     "calculator":        lambda args: execute_calculator(args["expression"]),
     "get_datetime":      lambda args: execute_get_datetime(),
-    "wikipedia_summary": lambda args: execute_wikipedia_summary(args["topic"]),
 }
 
 

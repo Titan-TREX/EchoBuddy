@@ -16,6 +16,7 @@ from temporalio import activity
 
 from config.settings import settings
 from realtime.tools import TOOL_SCHEMAS, run_tool
+from rag.retriever import retrieve_context
 from temporal.dto import ConversationTurn, LLMResult
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,17 @@ async def generate_reply(user_text: str, history: list[ConversationTurn]) -> LLM
     client = AsyncGroq(api_key=settings.gemini_api_key)
 
     # Build messages with system prompt + history + user message
-    messages = [{"role": "system", "content": _SYSTEM_PROMPT}]
+    # ── RAG: inject document context into system prompt ─────────────────
+    rag_context   = retrieve_context(user_text)
+    system_prompt = _SYSTEM_PROMPT
+    if rag_context:
+        system_prompt += (
+            "\n\nThe user has uploaded documents. "
+            "Use the excerpts below to answer questions about them accurately:\n\n"
+            + rag_context
+        )
+
+    messages = [{"role": "system", "content": system_prompt}]
     messages += [
         {"role": _ROLE_MAP.get(turn.role, "user"), "content": turn.content}
         for turn in history[-settings.gemini_max_history_turns:]
