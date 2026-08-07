@@ -11,6 +11,7 @@ ENV/
 env/
 .env
 .env.*
+!.env.example
 
 # --- Project Assets (Voice chatbot recordings) ---
 # Prevents user and bot generated audio files from being pushed to GitHub

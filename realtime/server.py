@@ -31,6 +31,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from temporalio.client import Client
@@ -48,6 +49,17 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
+
+# Allows the frontend to call this API from a different origin (e.g. a Vercel
+# deployment of static/index.html hitting this server hosted on Railway/Render).
+# Configure via CORS_ORIGINS; defaults to "*" for local same-origin use.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins_list,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 _STATIC_DIR = _PROJECT_ROOT / "static"
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")

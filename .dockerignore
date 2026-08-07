@@ -1,0 +1,14 @@
+.venv
+.env
+.git
+__pycache__
+*.pyc
+.pytest_cache
+chroma_db
+uploaded_docs
+assets/*.wav
+assets/*.mp3
+database/*.db
+database/*.sqlite
+database/*.sqlite3
+tests

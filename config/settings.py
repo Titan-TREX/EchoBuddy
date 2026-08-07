@@ -29,9 +29,9 @@ class Settings(BaseSettings):
     )
 
     # --- Third-party API credentials ---------------------------------------------------
-    deepgram_api_key: str = "REMOVED-LEAKED-DEEPGRAM-KEY"
-    gemini_api_key: str = "REMOVED-LEAKED-GROQ-KEY"
-    cartesia_api_key: str = "REMOVED-LEAKED-CARTESIA-KEY"
+    deepgram_api_key: str
+    gemini_api_key: str
+    cartesia_api_key: str
 
     # --- Deepgram (Speech-to-Text) ------------------------------------------------------
     deepgram_model: str = "nova-2"
@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     temporal_namespace: str = "default"
     temporal_task_queue: str = "voice-bot-queue"
 
+    # --- CORS ------------------------------------------------------------------------------
+    # Comma-separated list of allowed origins for the frontend when it's hosted
+    # separately from this API (e.g. "https://echobuddy.vercel.app"). Defaults to "*"
+    # for local same-origin use.
+    cors_origins: str = "*"
+
     # --- Filesystem / Database -----------------------------------------------------------
     base_dir: Path = Path(__file__).resolve().parent.parent
     assets_dir: Path = base_dir / "assets"
@@ -68,6 +74,10 @@ class Settings(BaseSettings):
     activity_retry_initial_interval_seconds: int = 1
     activity_retry_backoff_coefficient: float = 2.0
     activity_retry_max_attempts: int = 4
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
 
 settings = Settings()
