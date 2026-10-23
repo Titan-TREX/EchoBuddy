@@ -46,6 +46,14 @@ class Settings(BaseSettings):
     )
     gemini_max_history_turns: int = 10
 
+    # --- OpenRouter (LLM provider) + Langfuse (tracing) ----------------------------------
+    openrouter_api_key: str = ""
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_model: str = "meta-llama/llama-3.3-70b-instruct"
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_base_url: str = "https://cloud.langfuse.com"
+
     # --- Cartesia (Text-to-Speech) -------------------------------------------------------
     cartesia_model: str = "sonic-2"
     cartesia_voice_id: str = "694f9389-aac1-45b6-b726-9d9369183238"

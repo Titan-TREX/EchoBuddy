@@ -1,16 +1,22 @@
 """
-Activity: Conversational "brain" via Groq Cloud API.
+Activity: Conversational "brain" via OpenRouter, traced with Langfuse.
 
-STRICT BOUNDARY: this is the only module in the codebase allowed to import
-and call the `groq` SDK. It receives the latest user utterance plus
-a short rolling history (fetched by `db_activity.fetch_recent_history`) and
-returns the assistant's reply as plain text, ready for text-to-speech.
+STRICT BOUNDARY: this is the only module in the codebase allowed to call the
+LLM. It receives the latest user utterance plus a short rolling history
+(fetched by `db_activity.fetch_recent_history`) and returns the assistant's
+reply as plain text, ready for text-to-speech.
+
+OpenRouter exposes an OpenAI-compatible API, so we use the Langfuse drop-in
+`AsyncOpenAI` wrapper, which automatically records prompts, replies, latency,
+token usage and cost as a Langfuse generation.
 """
 
 from __future__ import annotations
 
 import logging
-from groq import AsyncGroq
+
+from langfuse import Langfuse
+from langfuse.openai import AsyncOpenAI
 from temporalio import activity
 
 from config.settings import settings
@@ -18,42 +24,43 @@ from temporal.dto import ConversationTurn, LLMResult
 
 logger = logging.getLogger(__name__)
 
-# Groq expects standard OpenAI roles: "user" and "assistant"
 _ROLE_MAP = {"user": "user", "assistant": "assistant"}
 
 _FALLBACK_REPLY = "Sorry, I didn't quite catch that. Could you say it again?"
 
+# Langfuse reads os.environ, but our config lives in `settings`, so register the
+# client explicitly. The langfuse.openai wrapper picks up this singleton.
+if settings.langfuse_public_key and settings.langfuse_secret_key:
+    Langfuse(
+        public_key=settings.langfuse_public_key,
+        secret_key=settings.langfuse_secret_key,
+        host=settings.langfuse_base_url,
+    )
+else:
+    logger.warning("Langfuse keys not set; LLM calls will not be traced.")
+
 
 @activity.defn
 async def generate_reply(user_text: str, history: list[ConversationTurn]) -> LLMResult:
-    """Generate the assistant's next reply using Groq API."""
-    activity.logger.info("Generating Groq LLM reply for: %r", user_text)
+    """Generate the assistant's next reply using OpenRouter."""
+    activity.logger.info("Generating LLM reply for: %r", user_text)
 
-    # Groq Client Initialization using the GEMINI_API_KEY environment variable location
-    client = AsyncGroq(api_key=settings.gemini_api_key)
+    client = AsyncOpenAI(
+        base_url=settings.openrouter_base_url,
+        api_key=settings.openrouter_api_key,
+    )
 
-    # 1. Convert Chat History into the Groq messages format
     messages = [
-        {
-            "role": _ROLE_MAP.get(turn.role, "user"), 
-            "content": turn.content
-        }
+        {"role": _ROLE_MAP.get(turn.role, "user"), "content": turn.content}
         for turn in history[-settings.gemini_max_history_turns :]
     ]
-    
-    # 2. Append the latest user utterance to the message list
     messages.append({"role": "user", "content": user_text})
 
-    # 3. Groq Async Chat Completion API Call
-    # Dynamic settings are used here; if it fails to resolve, it falls back to 'llama-3.3-70b-versatile'.
-    model_name = getattr(settings, "gemini_model", "llama-3.3-70b-versatile")
-    if "specdec" in model_name:
-        model_name = "llama-3.3-70b-versatile"
-
     response = await client.chat.completions.create(
-        model=model_name,  # Stable, running Groq versatile model
+        model=settings.openrouter_model,
         messages=messages,
         temperature=0.7,
+        name="voice-reply",
     )
 
     reply_text = (response.choices[0].message.content or "").strip() or _FALLBACK_REPLY
