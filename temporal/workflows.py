@@ -57,9 +57,9 @@ class VoiceChatbotWorkflow:
     Pipeline:
         1. Transcribe the user's recorded audio (Deepgram STT).
         2. Ensure the user/session rows exist (idempotent upsert).
-        3. Persist the user's transcribed message.
-        4. Fetch recent conversation history for LLM context.
-        5. Generate the assistant's reply (Gemini).
+        3. Fetch recent conversation history for LLM context.
+        4. Persist the user's transcribed message.
+        5. Generate the assistant's reply (OpenRouter).
         6. Synthesize the reply to speech (Cartesia TTS).
         7. Persist the assistant's message.
         8. Return everything the UI needs to render the turn.
@@ -81,6 +81,15 @@ class VoiceChatbotWorkflow:
             retry_policy=_RETRY_POLICY,
         )
 
+        # Fetch history BEFORE persisting this utterance: `generate_reply` appends
+        # the current user message itself, so logging first would send it twice.
+        history = await workflow.execute_activity(
+            fetch_recent_history,
+            args=[input.session_id, settings.history_max_turns],
+            start_to_close_timeout=_ACTIVITY_TIMEOUT,
+            retry_policy=_RETRY_POLICY,
+        )
+
         await workflow.execute_activity(
             log_message,
             MessageRecord(
@@ -93,16 +102,9 @@ class VoiceChatbotWorkflow:
             retry_policy=_RETRY_POLICY,
         )
 
-        history = await workflow.execute_activity(
-            fetch_recent_history,
-            args=[input.session_id, settings.gemini_max_history_turns],
-            start_to_close_timeout=_ACTIVITY_TIMEOUT,
-            retry_policy=_RETRY_POLICY,
-        )
-
         llm_result = await workflow.execute_activity(
             generate_reply,
-            args=[transcription.text, history],
+            args=[transcription.text, history, input.user_id],
             start_to_close_timeout=_ACTIVITY_TIMEOUT,
             retry_policy=_RETRY_POLICY,
         )

@@ -10,7 +10,7 @@ Since `worker.py` is primarily a wiring/entrypoint module, we test that:
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import AsyncMock, patch
 
 import pytest
 

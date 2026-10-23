@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -108,13 +108,13 @@ def mock_settings(tmp_path: Path) -> MagicMock:
     """Return a MagicMock that mimics Settings with safe test values."""
     s = MagicMock()
     s.deepgram_api_key = "test-deepgram-key"
-    s.gemini_api_key = "test-groq-key"
+    s.groq_api_key = "test-groq-key"
     s.cartesia_api_key = "test-cartesia-key"
     s.deepgram_model = "nova-2"
     s.deepgram_language = "en"
-    s.gemini_model = "llama-3.3-70b-versatile"
-    s.gemini_system_prompt = "You are a helpful assistant."
-    s.gemini_max_history_turns = 10
+    s.groq_model = "openai/gpt-oss-120b"
+    s.system_prompt = "You are a helpful assistant."
+    s.history_max_turns = 10
     s.cartesia_model = "sonic-2"
     s.cartesia_voice_id = "test-voice-id"
     s.cartesia_output_sample_rate = 44100
@@ -131,3 +131,15 @@ def mock_settings(tmp_path: Path) -> MagicMock:
     s.activity_retry_backoff_coefficient = 2.0
     s.activity_retry_max_attempts = 4
     return s
+
+
+@pytest.fixture(autouse=True)
+def _isolate_access_control(monkeypatch):
+    """Tests never inherit API_TOKEN from a developer's .env, and start with a fresh rate limiter."""
+    from config.settings import settings
+    from realtime.security import limiter
+
+    monkeypatch.setattr(settings, "api_token", "")
+    limiter.reset()
+    yield
+    limiter.reset()

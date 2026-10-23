@@ -1,29 +1,21 @@
 """
-Direct SQLite persistence for the realtime voice pipeline.
+Persistence operations: the only module that issues SQL.
 
-Deliberately does NOT go through Temporal: the batch pipeline in
-`temporal/activities/db_activity.py` uses `@activity.defn`, which requires
-an active Temporal activity execution context (for `activity.logger`, etc.).
-Calling those functions directly from a plain asyncio WebSocket handler
-would fail outside that context. This module re-implements the same SQL
-against the same schema, using plain `logging` instead, so it works as a
-normal async function call with minimal overhead — important here since
-every millisecond is in the hot path of a live conversation.
-
-Schema (database/schema.sql) is unchanged and shared with the batch
-pipeline; both systems can write to the same database safely.
+Both pipelines use these functions - the Temporal activities
+(`temporal/activities/db_activity.py`) wrap them with `@activity.defn`, and the
+realtime pipeline calls them directly. Every query uses `?` placeholders, never
+f-strings or `.format()`, so there is no SQL-injection surface. Each function
+is a small, idempotent-where-it-matters unit of work, which matters because
+Temporal activities run with at-least-once semantics.
 """
 
 from __future__ import annotations
 
-import logging
-
 from database.connection import get_connection
-
-logger = logging.getLogger(__name__)
 
 
 async def ensure_user_and_session(user_id: str, session_id: str, username: str) -> None:
+    """Idempotently make sure the user and session rows exist (`INSERT OR IGNORE`)."""
     async with get_connection() as db:
         await db.execute(
             "INSERT OR IGNORE INTO users (id, username) VALUES (?, ?);",
@@ -37,6 +29,7 @@ async def ensure_user_and_session(user_id: str, session_id: str, username: str) 
 
 
 async def fetch_recent_history(session_id: str, limit: int) -> list[dict]:
+    """The last `limit` messages of a session as `{"role", "content"}` dicts, oldest first."""
     async with get_connection() as db:
         cursor = await db.execute(
             """
@@ -54,9 +47,10 @@ async def fetch_recent_history(session_id: str, limit: int) -> list[dict]:
 
 async def log_message(
     session_id: str, role: str, content: str, audio_path: str | None
-) -> None:
+) -> int:
+    """Persist one chat message. Returns its row id (-1 if the driver reports none)."""
     async with get_connection() as db:
-        await db.execute(
+        cursor = await db.execute(
             """
             INSERT INTO messages (session_id, role, content, audio_path)
             VALUES (?, ?, ?, ?);
@@ -64,3 +58,4 @@ async def log_message(
             (session_id, role, content, audio_path),
         )
         await db.commit()
+        return cursor.lastrowid if cursor.lastrowid is not None else -1

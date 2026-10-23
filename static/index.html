@@ -8,6 +8,7 @@
      Leave empty to call same-origin, which is correct when the FastAPI server
      itself serves this file (its "/" route). -->
 <meta name="api-base" content="" />
+<link rel="icon" href="data:," />
 <title>EchoBuddy</title>
 <style>
   :root {
@@ -313,6 +314,71 @@ function apiUrl(path) {
   return `${API_BASE}${path}`;
 }
 
+/* Access token: only needed when the server sets API_TOKEN. We ask for it the first
+   time the server answers 401, then remember it in this browser. */
+const TOKEN_KEY = "echobuddy_access_token";
+
+function getToken() {
+  try { return localStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; }
+}
+
+function setToken(token) {
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token); else localStorage.removeItem(TOKEN_KEY);
+  } catch (e) { /* storage unavailable: token just won't persist */ }
+}
+
+/* Per-browser identity. It is kept across reloads and owns the documents this browser
+   uploads, so it is long and random (128 bits) rather than guessable. */
+const USER_ID_KEY = "echobuddy_user_id";
+
+function newUserId() {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return "u_" + Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function getUserId() {
+  try {
+    let id = localStorage.getItem(USER_ID_KEY);
+    if (!id) { id = newUserId(); localStorage.setItem(USER_ID_KEY, id); }
+    return id;
+  } catch (e) {
+    return newUserId(); // storage unavailable: still works, but documents won't survive a reload
+  }
+}
+
+const userId = getUserId();
+
+// fetch() against the API: sends the token and user id; on 401 asks for the token once and retries.
+async function apiFetch(path, options = {}, alreadyAsked = false) {
+  const headers = new Headers(options.headers || {});
+  const token = getToken();
+  if (token) headers.set("Authorization", "Bearer " + token);
+  headers.set("X-User-Id", userId);
+
+  const res = await fetch(apiUrl(path), { ...options, headers });
+
+  if (res.status === 401 && !alreadyAsked) {
+    const entered = window.prompt("This server needs an access token:");
+    if (entered && entered.trim()) {
+      setToken(entered.trim());
+      return apiFetch(path, options, true);
+    }
+    setToken("");
+  }
+  if (res.status === 401 && alreadyAsked) {
+    setToken(""); // the token we just tried was wrong: forget it so the next action asks again
+    throw new Error("Wrong access token.");
+  }
+  if (res.status === 429) throw new Error("Too many requests - please wait a moment and try again.");
+  return res;
+}
+
+async function ensureAccess() {
+  const res = await apiFetch("/api/auth/check");
+  if (!res.ok) throw new Error("Access denied - a valid access token is required.");
+}
+
 function wsUrl(path) {
   if (API_BASE) {
     const u = new URL(API_BASE);
@@ -392,7 +458,6 @@ let isRecording = false;
 
 // Stable per-tab identifiers so every turn lands in the same Temporal
 // conversation/session history.
-const tempUserId = "user_" + Math.random().toString(16).slice(2, 10);
 let tempSessionId = crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
 
 async function startRecording() {
@@ -435,10 +500,10 @@ async function sendRecording(blob) {
   try {
     const form = new FormData();
     form.append("audio", blob, "recording.webm");
-    form.append("user_id", tempUserId);
+    form.append("user_id", userId);
     form.append("session_id", tempSessionId);
 
-    const res = await fetch(apiUrl("/api/voice-chat"), { method: "POST", body: form });
+    const res = await apiFetch("/api/voice-chat", { method: "POST", body: form });
     if (!res.ok) throw new Error(`Server responded ${res.status}`);
     const data = await res.json();
 
@@ -480,7 +545,8 @@ micBtn.addEventListener("click", () => {
 /* =========================================================================
    MODE 2 — Waveform button: continuous realtime pipeline (WebSocket /ws)
    ========================================================================= */
-const PLAYBACK_SAMPLE_RATE = 16000; // must match TTS_SAMPLE_RATE in realtime/tts_stream.py
+// Default only; the server sends its real TTS_SAMPLE_RATE in the "ready" message.
+let playbackSampleRate = 16000;
 
 let realtimeActive = false;
 let audioCtx, micStream, processor, source, ws;
@@ -499,7 +565,7 @@ function playPcm16Chunk(arrayBuffer) {
   const float32 = new Float32Array(int16.length);
   for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
 
-  const buffer = audioCtx.createBuffer(1, float32.length, PLAYBACK_SAMPLE_RATE);
+  const buffer = audioCtx.createBuffer(1, float32.length, playbackSampleRate);
   buffer.copyToChannel(float32, 0);
 
   const src = audioCtx.createBufferSource();
@@ -518,6 +584,7 @@ function playPcm16Chunk(arrayBuffer) {
 function handleControlMessage(msg) {
   switch (msg.type) {
     case "ready":
+      if (msg.ttsSampleRate) playbackSampleRate = msg.ttsSampleRate;
       setStatus("Listening…", "listening", "Live");
       break;
     case "listening_stopped":
@@ -556,6 +623,7 @@ function handleControlMessage(msg) {
 }
 
 async function startRealtime() {
+  await ensureAccess(); // before the mic prompt, so a missing token fails early
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   await audioCtx.resume();
 
@@ -563,11 +631,13 @@ async function startRealtime() {
     audio: { echoCancellation: true, noiseSuppression: true },
   });
 
-  ws = new WebSocket(wsUrl("/ws"));
+  // Browsers can't set headers on a WebSocket, so the token travels as a query parameter.
+  const token = getToken();
+  ws = new WebSocket(wsUrl("/ws") + (token ? "?token=" + encodeURIComponent(token) : ""));
   ws.binaryType = "arraybuffer";
 
   ws.onopen = () => {
-    ws.send(JSON.stringify({ type: "start", sampleRate: audioCtx.sampleRate }));
+    ws.send(JSON.stringify({ type: "start", sampleRate: audioCtx.sampleRate, userId }));
   };
 
   ws.onmessage = (event) => {
@@ -627,7 +697,7 @@ realtimeBtn.addEventListener("click", async () => {
       await startRealtime();
     } catch (err) {
       stopRealtime();
-      setStatus("Mic error: " + err.message, "", "Error");
+      setStatus("Error: " + err.message, "", "Error");
     }
   } else {
     stopRealtime();
@@ -660,10 +730,10 @@ async function sendTextMessage() {
   realtimeBtn.disabled = true;
 
   try {
-    const res = await fetch("/api/text-chat", {
+    const res = await apiFetch("/api/text-chat", {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({ text, user_id: tempUserId, session_id: textSessionId }),
+      body:    JSON.stringify({ text, user_id: userId, session_id: textSessionId }),
     });
     if (!res.ok) throw new Error("Server " + res.status);
     const data = await res.json();
@@ -675,7 +745,7 @@ async function sendTextMessage() {
     if (data.bot_audio_path) {
       const audio = document.createElement("audio");
       audio.controls = true; audio.autoplay = true;
-      audio.src = data.bot_audio_path;
+      audio.src = apiUrl(data.bot_audio_path);
       botBubble.appendChild(document.createElement("br"));
       botBubble.appendChild(audio);
     }
@@ -717,7 +787,7 @@ document.getElementById("docInput").addEventListener("change", async function() 
   form.append("file", file);
 
   try {
-    const res  = await fetch("/api/upload-doc", { method: "POST", body: form });
+    const res  = await apiFetch("/api/upload-doc", { method: "POST", body: form });
     const data = await res.json();
     if (data.success) {
       showToast("✅ " + data.chunks_added + " chunks added from “" + data.file + "”");

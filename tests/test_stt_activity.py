@@ -54,7 +54,7 @@ class TestTranscribeAudio:
             mock_settings.deepgram_api_key = "test-key"
             mock_settings.deepgram_model = "nova-2"
             mock_settings.deepgram_language = "en"
-            mock_settings.base_dir = tmp_path
+            mock_settings.assets_dir = tmp_path
 
             instance = MagicMock()
             instance.listen.v1.media.transcribe_file = AsyncMock(return_value=mock_response)
@@ -82,7 +82,7 @@ class TestTranscribeAudio:
             mock_settings.deepgram_api_key = "k"
             mock_settings.deepgram_model = "nova-2"
             mock_settings.deepgram_language = "en"
-            mock_settings.base_dir = tmp_path
+            mock_settings.assets_dir = tmp_path
 
             inst = MagicMock()
             inst.listen.v1.media.transcribe_file = AsyncMock(return_value=mock_response)
@@ -112,7 +112,7 @@ class TestTranscribeAudio:
             mock_settings.deepgram_api_key = "k"
             mock_settings.deepgram_model = "nova-2"
             mock_settings.deepgram_language = "en"
-            mock_settings.base_dir = tmp_path
+            mock_settings.assets_dir = tmp_path
 
             inst = MagicMock()
             inst.listen.v1.media.transcribe_file = capture_call
@@ -146,7 +146,7 @@ class TestTranscribeAudioEdgeCases:
             mock_settings.deepgram_api_key = "k"
             mock_settings.deepgram_model = "nova-2"
             mock_settings.deepgram_language = "en"
-            mock_settings.base_dir = tmp_path
+            mock_settings.assets_dir = tmp_path
 
             inst = MagicMock()
             inst.listen.v1.media.transcribe_file = AsyncMock(return_value=mock_response)
@@ -172,7 +172,7 @@ class TestTranscribeAudioEdgeCases:
             mock_settings.deepgram_api_key = "k"
             mock_settings.deepgram_model = "nova-2"
             mock_settings.deepgram_language = "en"
-            mock_settings.base_dir = tmp_path
+            mock_settings.assets_dir = tmp_path
 
             inst = MagicMock()
             inst.listen.v1.media.transcribe_file = AsyncMock(return_value=mock_response)
@@ -196,7 +196,7 @@ class TestTranscribeAudioFileNotFound:
             patch(f"{_MODULE}.settings") as mock_settings,
         ):
             mock_settings.deepgram_api_key = "k"
-            mock_settings.base_dir = tmp_path
+            mock_settings.assets_dir = tmp_path
 
             from temporal.activities.stt_activity import transcribe_audio
 
@@ -210,7 +210,7 @@ class TestTranscribeAudioFileNotFound:
             patch(f"{_MODULE}.settings") as mock_settings,
         ):
             mock_settings.deepgram_api_key = "k"
-            mock_settings.base_dir = tmp_path
+            mock_settings.assets_dir = tmp_path
 
             from temporal.activities.stt_activity import transcribe_audio
 

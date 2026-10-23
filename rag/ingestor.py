@@ -1,141 +1,161 @@
 """
-RAG document ingestion for EchoBuddy.
+RAG document ingestion.
 
-Supported formats:
-  - PDF  → chunked via PyPDFLoader + RecursiveCharacterTextSplitter
-  - TXT  → read directly, then chunked
+Supported formats (see `settings.allowed_doc_extensions`):
+  - PDF -> text via PyPDFLoader
+  - TXT -> read directly (UTF-8, falling back to latin-1)
 
-Documents are stored in a local ChromaDB vector store using
-sentence-transformers embeddings (no external API key needed).
-The store persists to disk at <project_root>/chroma_db so ingested
-documents survive server restarts.
+Every chunk is tagged with its owner (the uploading user's id), and every
+operation here is filtered by it, so users only ever see their own documents.
 
-Architecture note:
-  This module is called by realtime/server.py (upload endpoint) and
-  by realtime/tools.py (search_documents tool executor). Neither
-  llm_stream.py nor llm_activity.py are touched — RAG is just another
-  tool that Groq decides to call when the user's question involves documents.
+Text is split into overlapping chunks and stored in a local ChromaDB vector
+store using sentence-transformers embeddings (no external API key needed). The
+store persists to `settings.chroma_path`, so ingested documents survive
+restarts. Paths, model name, chunk sizes and batch size all come from
+`config/settings.py`.
+
+Everything here is synchronous (embedding + disk); async callers should run it
+with `asyncio.to_thread`.
 """
 
 from __future__ import annotations
 
 import logging
-import os
+import threading
 import uuid
 from pathlib import Path
 
+from config.settings import settings
+
 logger = logging.getLogger(__name__)
 
-# ── ChromaDB / embedding setup ────────────────────────────────────────────────
-
-# Resolve project root without importing settings to avoid circular imports.
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CHROMA_PATH   = str(_PROJECT_ROOT / "chroma_db")
-COLLECTION    = "echobuddy_docs"
+_collection = None
+_collection_lock = threading.Lock()
 
 
-def _get_collection():
-    """Return (or create) the ChromaDB collection with sentence-transformer embeddings."""
+def get_collection():
+    """Return the shared ChromaDB collection, creating it on first use.
+
+    Loading the embedding model takes ~25s, so it must happen once per process,
+    not once per chat message. The lock stops the startup warm-up and an early
+    request from building two Chroma clients on the same path at once.
+    """
+    global _collection
+    with _collection_lock:
+        if _collection is None:
+            _collection = _build_collection()
+        return _collection
+
+
+def is_ready() -> bool:
+    """True once the vector store and embedding model have been loaded."""
+    return _collection is not None
+
+
+def _build_collection():
     import chromadb
     from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
 
-    client = chromadb.PersistentClient(path=CHROMA_PATH)
-    emb_fn = SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-    return client.get_or_create_collection(COLLECTION, embedding_function=emb_fn)
+    client = chromadb.PersistentClient(path=str(settings.chroma_path))
+    embedder = SentenceTransformerEmbeddingFunction(model_name=settings.embedding_model)
+    return client.get_or_create_collection(settings.chroma_collection, embedding_function=embedder)
 
 
-# ── Chunking helpers ──────────────────────────────────────────────────────────
+# ── Loading and chunking ──────────────────────────────────────────────────────
 
-def _chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]:
-    """Split plain text into overlapping chunks."""
+def _chunk_text(text: str) -> list[str]:
     from langchain_text_splitters import RecursiveCharacterTextSplitter
 
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size, chunk_overlap=overlap
+        chunk_size=settings.rag_chunk_size, chunk_overlap=settings.rag_chunk_overlap
     )
     return splitter.split_text(text)
 
 
-def _load_pdf(path: str) -> str:
-    """Extract full text from a PDF using LangChain's PyPDFLoader."""
+def _load_pdf(path: Path) -> str:
     from langchain_community.document_loaders import PyPDFLoader
 
-    pages = PyPDFLoader(path).load()
-    return "\n\n".join(p.page_content for p in pages)
+    pages = PyPDFLoader(str(path)).load()
+    return "\n\n".join(page.page_content for page in pages)
 
 
-def _load_txt(path: str) -> str:
-    """Read a plain-text file, trying UTF-8 then latin-1 as fallback."""
+def _load_txt(path: Path) -> str:
     try:
-        return Path(path).read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
-        return Path(path).read_text(encoding="latin-1")
+        return path.read_text(encoding="latin-1")
+
+
+_LOADERS = {".pdf": _load_pdf, ".txt": _load_txt}
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def ingest_file(file_path: str) -> dict:
-    """Ingest a PDF or TXT file into ChromaDB.
+def _owned(filename: str, owner: str) -> dict:
+    return {"$and": [{"source": filename}, {"owner": owner}]}
 
-    Args:
-        file_path: Absolute path to the file on disk.
 
-    Returns:
-        dict with keys: file, chunks_added, total_docs
+def ingest_file(file_path: str, owner: str) -> dict:
+    """Ingest a PDF or TXT file into ChromaDB on behalf of `owner`.
+
+    Returns a dict with: file, chunks_added, total_chunks (the owner's chunk count).
+    Raises FileNotFoundError / ValueError for a missing or unsupported file.
     """
-    path   = Path(file_path)
+    path = Path(file_path)
     suffix = path.suffix.lower()
 
-    if not path.exists():
+    if not path.is_file():
         raise FileNotFoundError(f"File not found: {file_path}")
+    if suffix not in settings.allowed_doc_extensions or suffix not in _LOADERS:
+        allowed = ", ".join(settings.allowed_doc_extensions)
+        raise ValueError(f"Unsupported file type '{suffix}' (allowed: {allowed})")
 
-    if suffix == ".pdf":
-        raw_text = _load_pdf(file_path)
-    elif suffix == ".txt":
-        raw_text = _load_txt(file_path)
-    else:
-        raise ValueError(f"Unsupported file type: {suffix} (only .pdf and .txt allowed)")
+    collection = get_collection()
+    chunks = _chunk_text(_LOADERS[suffix](path))
+    if not chunks:
+        return {"file": path.name, "chunks_added": 0, "total_chunks": _owner_chunk_count(owner)}
 
-    if not raw_text.strip():
-        return {"file": path.name, "chunks_added": 0, "total_docs": 0}
+    # Re-uploading a file replaces the owner's old chunks instead of duplicating them.
+    delete_doc(path.name, owner)
 
-    chunks     = _chunk_text(raw_text)
-    collection = _get_collection()
-    doc_name   = path.name
+    metadata = {"source": path.name, "owner": owner, "type": suffix.lstrip(".")}
+    step = settings.rag_batch_size
+    for start in range(0, len(chunks), step):
+        batch = chunks[start:start + step]
+        collection.add(
+            documents=batch,
+            ids=[str(uuid.uuid4()) for _ in batch],
+            metadatas=[metadata] * len(batch),
+        )
 
-    collection.add(
-        documents=chunks,
-        ids=[str(uuid.uuid4()) for _ in chunks],
-        metadatas=[{"source": doc_name, "type": suffix.lstrip(".")} for _ in chunks],
-    )
-
-    logger.info("Ingested %d chunks from '%s'", len(chunks), doc_name)
+    logger.info("Ingested %d chunks from '%s'", len(chunks), path.name)
     return {
-        "file":         doc_name,
+        "file": path.name,
         "chunks_added": len(chunks),
-        "total_docs":   collection.count(),
+        "total_chunks": _owner_chunk_count(owner),
     }
 
 
-def list_docs() -> list[str]:
-    """Return sorted list of ingested document filenames."""
-    col = _get_collection()
-    if col.count() == 0:
-        return []
-    res = col.get(include=["metadatas"])
-    return sorted({m["source"] for m in res["metadatas"]})
+def _owner_chunk_count(owner: str) -> int:
+    return len(get_collection().get(where={"owner": owner}, include=[]).get("ids", []))
 
 
-def delete_doc(filename: str) -> int:
-    """Remove all chunks belonging to a specific document.
+def has_docs(owner: str) -> bool:
+    """Cheap check (no embedding) for whether `owner` has uploaded anything."""
+    return bool(get_collection().get(where={"owner": owner}, limit=1, include=[]).get("ids"))
 
-    Returns:
-        Number of chunks deleted.
-    """
-    col = _get_collection()
-    res = col.get(where={"source": filename}, include=["metadatas"])
-    ids = res.get("ids", [])
+
+def list_docs(owner: str) -> list[str]:
+    """Sorted filenames of the documents `owner` has ingested."""
+    metadatas = get_collection().get(where={"owner": owner}, include=["metadatas"])["metadatas"]
+    return sorted({m["source"] for m in metadatas})
+
+
+def delete_doc(filename: str, owner: str) -> int:
+    """Remove all of `owner`'s chunks of one document. Returns the number deleted."""
+    collection = get_collection()
+    ids = collection.get(where=_owned(filename, owner), include=[]).get("ids", [])
     if ids:
-        col.delete(ids=ids)
+        collection.delete(ids=ids)
         logger.info("Deleted %d chunks for '%s'", len(ids), filename)
     return len(ids)

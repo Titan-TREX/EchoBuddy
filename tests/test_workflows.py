@@ -14,8 +14,6 @@ Coverage:
 
 from __future__ import annotations
 
-from datetime import timedelta
-from unittest.mock import AsyncMock, patch
 
 import pytest
 from temporalio import activity
@@ -70,7 +68,7 @@ async def stub_history(session_id: str, limit: int) -> list[ConversationTurn]:
 
 
 @activity.defn(name="generate_reply")
-async def stub_generate(user_text: str, history: list[ConversationTurn]) -> LLMResult:
+async def stub_generate(user_text: str, history: list[ConversationTurn], owner: str = "") -> LLMResult:
     CALL_LOG.append("generate_reply")
     return LLMResult(text="stub bot reply")
 
@@ -156,8 +154,8 @@ class TestVoiceChatbotWorkflow:
         expected_order = [
             "transcribe_audio",
             "ensure_user_and_session",
+            "fetch_recent_history",  # before the user message is logged, so it isn't sent twice
             "log_message:user",
-            "fetch_recent_history",
             "generate_reply",
             "synthesize_speech",
             "log_message:assistant",

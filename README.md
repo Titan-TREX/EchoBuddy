@@ -1,116 +1,141 @@
-# Voice-to-Voice AI Chatbot
+# EchoBuddy — Voice-to-Voice AI Chatbot
 
-Dual-mode voice chatbot with **Temporal.io** (batch pipeline) and **WebSocket** (realtime pipeline). Uses **Deepgram** (STT), **Groq LLM**, **Cartesia** (TTS).
+A voice chatbot with two pipelines behind one UI:
 
-## Running the app
+- **Realtime** (WebSocket): live mic streaming, server-side voice-activity detection, streamed text and audio replies, tool calling and document search.
+- **Batch** (Temporal.io): record a clip, get a full reply; fault-tolerant, with retries.
+- **Text chat**: type a message, get a text and spoken reply.
+
+**Stack:** Deepgram (speech-to-text) · Groq / OpenRouter (LLM) · Cartesia (text-to-speech) · FastAPI · Temporal · SQLite · ChromaDB (RAG) · Langfuse (tracing).
+
+## Running locally
 
 ```bash
-# Terminal 1: Docker up
-Docker compose up -d
-# Terminal 2: Temporal Worker
-uv run python -m temporal.worker  
+cp .env.example .env            # then fill in the API keys
+uv sync
 
-# Terminal 3: FastAPI Server
-uv run uvicorn realtime.server:app --reload --port 8000
+docker compose up -d            # Terminal 1: Temporal server (batch mode only)
+uv run python -m temporal.worker                          # Terminal 2: Temporal worker (batch mode only)
+uv run uvicorn realtime.server:app --reload --port 8000   # Terminal 3: API + UI
 
-# Then open: http://localhost:8000
+# open http://localhost:8000
 ```
 
-**Requirement:** Temporal server must be running (Docker or `temporal server start-dev`).
+The realtime and text-chat modes need only the API server. Temporal is required just for the 🎤 batch mode.
+
+## Configuration — nothing is hardcoded
+
+[`config/settings.py`](config/settings.py) is the single source of truth. Every value below is a field there and can be overridden by an environment variable of the same name in `UPPER_CASE` (see [`.env.example`](.env.example)). Long prompts live in [`config/prompts.py`](config/prompts.py).
+
+| Area | Examples |
+|------|----------|
+| Credentials | `DEEPGRAM_API_KEY`, `GROQ_API_KEY`, `CARTESIA_API_KEY`, `OPENROUTER_API_KEY`, `LANGFUSE_*` |
+| LLM | `GROQ_MODEL`, `OPENROUTER_MODEL`, `SYSTEM_PROMPT`, `HISTORY_MAX_TURNS`, `LLM_*_TEMPERATURE`, `FORCE_TOOL_KEYWORDS` |
+| Speech | `DEEPGRAM_MODEL`, `CARTESIA_MODEL`, `CARTESIA_VOICE_ID`, `TTS_SAMPLE_RATE` |
+| Voice detection | `VAD_AGGRESSIVENESS`, `VAD_SILENCE_TIMEOUT_MS`, `VAD_MIN_SPEECH_RMS` |
+| Tools | `WEB_SEARCH_MAX_RESULTS`, `WEATHER_URL_TEMPLATE`, `CALCULATOR_MAX_EXPONENT` |
+| Documents (RAG) | `EMBEDDING_MODEL`, `RAG_CHUNK_SIZE`, `RAG_TOP_K`, `RAG_MAX_DISTANCE`, `MAX_UPLOAD_MB` |
+| Server | `LOG_LEVEL`, `CORS_ORIGINS`, `ALLOWED_AUDIO_EXTENSIONS` |
+| Access control | `API_TOKEN`, `RATE_LIMIT_REQUESTS`, `RATE_LIMIT_WINDOW_SECONDS`, `TRUST_PROXY_HEADERS` |
+| Temporal | `TEMPORAL_ADDRESS`, `TEMPORAL_TASK_QUEUE`, `ACTIVITY_*` retry and timeout tuning |
+
+The old `GEMINI_*` variable names are still accepted as aliases for the Groq settings.
 
 ## Architecture
 
 ```
-voice_chatbot_system/
-├── config/                  # Environment settings (config/settings.py)
-├── database/                # Infrastructure layer
-│   ├── connection.py        # async SQLite connection helper
-│   ├── schema.sql           # users / sessions / messages (3NF)
-│   └── voice_chatbot.db     # SQLite database (auto-created)
-├── temporal/                # Batch pipeline - Temporal orchestration
-│   ├── workflows.py         # VoiceChatbotWorkflow (sequencing only)
-│   ├── dto.py               # Shared dataclasses (workflow ↔ activity boundary)
-│   ├── worker.py            # Worker process (registers workflow + activities)
-│   └── activities/          # Execution layer - one external dependency per file
-│       ├── stt_activity.py      # Deepgram (speech-to-text)
-│       ├── llm_activity.py      # Groq LLM (conversational brain)
-│       ├── tts_activity.py      # Cartesia (text-to-speech)
-│       └── db_activity.py       # SQLite persistence (Temporal-safe)
-├── realtime/                # Realtime pipeline - WebSocket streaming
-│   ├── server.py            # FastAPI server (both pipelines)
-│   ├── session.py           # Per-connection orchestration (VAD, turn-taking)
-│   ├── db.py                # Direct SQLite ops (for realtime, non-Temporal)
-│   ├── stt.py               # Deepgram (realtime utterance → text)
-│   ├── llm_stream.py        # Groq streaming (sentence-by-sentence yields)
-│   ├── tts_stream.py        # Cartesia streaming (PCM16 chunks)
-│   └── static/
-│       └── index.html       # Unified ChatGPT-style UI (both modes)
-├── assets/                  # Audio files (user recordings + bot replies)
-│                            # Shared by both pipelines
-├── requirements.txt
-└── .env
+config/                      Settings (settings.py), prompts (prompts.py), Langfuse setup (tracing.py)
+core/                        Logic shared by BOTH pipelines
+├── prompting.py             system prompt + the user's document excerpts + history, tool-forcing heuristic
+├── tool_loop.py             the two tool-calling steps (decide, run) against any OpenAI-style client
+├── tools.py                 tool registry: web search, weather, calculator, date/time
+└── assets.py                `assets/<name>` audio references (no filesystem paths leak into API/DB)
+database/
+├── connection.py            async SQLite connection + schema bootstrap
+├── repository.py            the ONLY place that issues SQL (used by both pipelines)
+└── schema.sql               users / sessions / messages
+realtime/                    Realtime + text chat
+├── server.py                FastAPI app setup (middleware, mounts, startup, background tasks)
+├── routes/
+│   ├── chat.py              POST /api/voice-chat (Temporal), POST /api/text-chat
+│   ├── ws.py                WS /ws (realtime voice)
+│   ├── documents.py         /api/upload-doc, /api/docs   (per-user)
+│   ├── auth.py · health.py  /api/auth/check, /health
+├── security.py              access token, rate limiting, user-id validation
+├── session.py               per-connection turn-taking (VAD → STT → LLM → TTS)
+├── llm_stream.py            streaming reply (Groq) on top of core/
+├── stt.py · tts_stream.py   Deepgram / Cartesia
+├── audio.py · cleanup.py    PCM/WAV helpers · old-audio cleanup
+rag/                         ingestor.py (PDF/TXT → ChromaDB, per owner), retriever.py (semantic search)
+temporal/                    Batch pipeline
+├── workflows.py             VoiceChatbotWorkflow (sequencing only, no I/O)
+├── worker.py · dto.py
+└── activities/              one external dependency per file (stt, llm via OpenRouter, tts, db)
+static/                      the UI: index.html, plus build.mjs + vercel.json for the Vercel deploy
+tests/                       pytest suite · tests/harness: live end-to-end, load and LLM-quality checks
 ```
 
-## Two Modes
+Dependencies point inward: routes / activities → `core` → `config` / `database` / `rag`. Both pipelines share `core/`, so they behave the same (tools, document search, prompts). Nothing outside `database/repository.py` issues SQL, and no tunable is hardcoded.
 
-| Button | Mode | Behavior |
-|--------|------|----------|
-| 🎤 Mic | Batch (Temporal) | Click = record, click again = upload → wait for full reply |
-| 〜 Waveform | Realtime (WebSocket) | Click = start live mode, click again = stop |
+## Security
 
-Both modes share the same SQLite database and audio folder.
+- **Access token:** set `API_TOKEN` and every API route (and the WebSocket) requires it. The page itself stays public; the UI asks for the token the first time the server answers 401 and remembers it in that browser. Leave it empty for an open demo.
+- **Rate limiting:** always on, per client (30 requests/minute by default; uploads count extra). Behind Railway/Render set `TRUST_PROXY_HEADERS=true` so the limit applies per real client IP, not per proxy. The limiter is in-memory, so it is per server process.
+- **Per-user documents:** each browser keeps a long random id (`localStorage`) and sends it as `X-User-Id` (and in the WebSocket start message). Uploaded documents belong to that id: search, listing and deletion only ever see the caller's own files, which are also stored in a per-user folder. Clearing browser storage creates a new identity, so previously uploaded documents are no longer reachable from that browser. Documents ingested before this feature have no owner and are never returned.
+- **Audio cleanup:** recordings and spoken replies in `assets/` are deleted after `ASSETS_RETENTION_HOURS` (default 24; 0 keeps them). Only the app's own `usr_*`/`bot_*` audio files are ever touched; chat history text is kept.
+- Uploads are restricted to allowed types, size-capped, and saved under sanitised names.
 
-## Prerequisites
+## Observability
 
-- Python 3.11+
-- Temporal server running
-- API keys: Deepgram, Groq, Cartesia
+With `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY` set, every turn is traced in Langfuse: one trace per voice or text turn, with child observations for speech-to-text, RAG retrieval, each tool call, every LLM generation (prompt, reply, latency, tokens) and text-to-speech. Without the keys, tracing is skipped and nothing else changes.
 
-## Setup
+## Testing
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+uv run pytest                                   # unit + route tests (no network, ~280 tests)
 
-# Edit .env with your API keys
-cp .env.example .env
+# Live checks (these call the real Deepgram / Groq / OpenRouter / Cartesia APIs and cost a few requests):
+uv run python -m tests.harness.batch_e2e        # Temporal batch pipeline on a local Temporal dev server
+uv run python -m tests.harness.load_test http://localhost:8000    # concurrency, rate limiting, real chats
 ```
 
-## Configuration
+## Deployment
 
-| Variable | Default |
-|----------|---------|
-| `DEEPGRAM_API_KEY` | _(required)_ |
-| `GROQ_API_KEY` | _(required)_ |
-| `CARTESIA_API_KEY` | _(required)_ |
-| `DEEPGRAM_MODEL` | `nova-2` |
-| `GEMINI_MODEL` | `llama-3.3-70b-versatile` |
-| `TEMPORAL_ADDRESS` | `localhost:7233` |
-| `TEMPORAL_TASK_QUEUE` | `voice-bot-queue` |
+Two pieces, hosted separately (Vercel cannot run the backend: it needs WebSockets, a long-lived worker and
+a local vector store).
 
-## Database
+### Backend (any container host: Railway, Render, Fly, a VPS)
 
-```
-users (id, username, created_at)
-  ↓
-sessions (id, user_id, started_at, ended_at)
-  ↓
-messages (id, session_id, role, content, audio_path, created_at)
-```
+Build the [Dockerfile](Dockerfile) (CPU-only PyTorch, runs as a non-root user, embedding model baked in).
 
-Audio files stored in `assets/` with UUID filenames.
+1. **Service 1 — API:** default start command. Health check path: `/health`.
+2. **Service 2 — worker** (only if you use the 🎤 batch mode): same image, start command `python -m temporal.worker`,
+   plus a Temporal server it can reach (`TEMPORAL_ADDRESS`; Temporal Cloud works).
+3. **Volume:** mount ONE persistent volume at `/data`. The database, vector store, uploaded documents and audio all
+   live there (`DATA_DIR=/data` is already set in the image); without a volume they vanish on every redeploy.
+4. **Environment variables:** `DEEPGRAM_API_KEY`, `GROQ_API_KEY`, `CARTESIA_API_KEY`, `OPENROUTER_API_KEY`,
+   `LANGFUSE_*` (optional), and for a public site:
+   `API_TOKEN` (or leave empty for an open demo), `TRUST_PROXY_HEADERS=true`, `CORS_ORIGINS=https://<your-frontend>`.
+5. Run **one** API instance: the SQLite database, vector store and rate limiter are per process.
+
+### Frontend (Vercel)
+
+The page reads the backend URL from `<meta name="api-base">`, which [`static/build.mjs`](static/build.mjs) fills in at
+build time from an environment variable, so no URL is hardcoded.
+
+1. Import the repo in Vercel and set **Root Directory = `static`** (so Vercel doesn't mistake the repo for a Python app).
+2. Set the environment variable **`API_BASE_URL`** = your backend's public `https://` URL (no path).
+   A production build without it fails on purpose.
+3. Deploy. Then set the backend's `CORS_ORIGINS` to the Vercel URL.
+
+Or from a terminal: `cd static && npx vercel --prod` (`vercel env add API_BASE_URL production` first).
 
 ## Troubleshooting
 
-| Issue | Solution |
-|-------|----------|
-| "Connection refused 127.0.0.1:7233" | Start Temporal: `temporal server start-dev` |
-| "Workflow failed" timeout | Check worker: `python -m temporal.worker` |
-| Audio not serving (404) | Create folder: `mkdir -p assets` |
-
-## Files Changed
-
-- `realtime/server.py` — added `/api/voice-chat` endpoint + `/assets` mount
-- `realtime/static/index.html` — new dual-mode UI
-- All other files unchanged
+| Issue | Fix |
+|-------|-----|
+| `Connection refused 127.0.0.1:7233` | Start Temporal: `docker compose up -d` |
+| Batch mode times out | Make sure the worker is running: `uv run python -m temporal.worker` |
+| Reply is the fallback sentence every time | The LLM call is failing. Check the server log; most often `GROQ_MODEL` isn't available to your key |
+| First message is slow after a restart | The embedding model loads in the background at startup (~20 s); it is cached afterwards |
+| Bot reacts to background noise | Raise `VAD_MIN_SPEECH_RMS` or `VAD_AGGRESSIVENESS` |

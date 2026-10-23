@@ -17,12 +17,15 @@ from cartesia import AsyncCartesia
 from temporalio import activity
 
 from config.settings import settings
+from config.tracing import observe
+from core.assets import asset_ref
 from temporal.dto import SpeechResult
 
 logger = logging.getLogger(__name__)
 
 
 @activity.defn
+@observe(name="tts-cartesia")
 async def synthesize_speech(text: str) -> SpeechResult:
     """Convert the assistant's reply text into a playable `.mp3` file.
 
@@ -47,7 +50,7 @@ async def synthesize_speech(text: str) -> SpeechResult:
             model_id=settings.cartesia_model,
             transcript=text,
             voice={"mode": "id", "id": settings.cartesia_voice_id},
-            language="en",
+            language=settings.cartesia_language,
             output_format={
                 "container": "mp3",
                 "sample_rate": settings.cartesia_output_sample_rate,
@@ -62,8 +65,6 @@ async def synthesize_speech(text: str) -> SpeechResult:
                 audio_chunks.append(chunk["audio"])
             elif isinstance(chunk, bytes):
                 audio_chunks.append(chunk)
-            else:
-                audio_chunks.append(chunk)
 
     finally:
         await client.close()
@@ -71,5 +72,4 @@ async def synthesize_speech(text: str) -> SpeechResult:
     # Join all chunks together and write them to the file
     output_path.write_bytes(b"".join(audio_chunks))
 
-    relative_path = output_path.relative_to(settings.base_dir).as_posix()
-    return SpeechResult(audio_path=relative_path)
+    return SpeechResult(audio_path=asset_ref(output_path))

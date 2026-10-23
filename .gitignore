@@ -17,6 +17,10 @@ env/
 # Prevents user and bot generated audio files from being pushed to GitHub
 assets/*.wav
 assets/*.mp3
+assets/*.webm
+assets/*.ogg
+assets/*.m4a
+assets/*.pcm
 !assets/.gitkeep
 
 # --- Databases ---
@@ -41,3 +45,28 @@ desktop.ini
 
 # --- Streamlit ---
 .streamlit/config.toml
+
+# --- RAG / vector store / user uploads ---
+chroma_db/
+uploaded_docs/
+
+# --- Testing & coverage ---
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# --- Build / deploy ---
+.vercel/
+dist/
+build/
+*.egg-info/
+
+# --- Logs & temp ---
+*.log
+tmp/
+temp/
+
+# Browser-test scratch output
+.playwright-mcp/
+static/dist/

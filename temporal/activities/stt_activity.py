@@ -19,12 +19,15 @@ from deepgram import AsyncDeepgramClient
 from temporalio import activity
 
 from config.settings import settings
+from config.tracing import observe
+from core.assets import asset_path
 from temporal.dto import TranscriptionResult
 
 logger = logging.getLogger(__name__)
 
 
 @activity.defn
+@observe(name="stt-deepgram")
 async def transcribe_audio(audio_file_path: str) -> TranscriptionResult:
     """Transcribe a recorded user utterance to text using Deepgram Nova-2.
 
@@ -44,10 +47,7 @@ async def transcribe_audio(audio_file_path: str) -> TranscriptionResult:
     """
     activity.logger.info("Transcribing audio file: %s", audio_file_path)
 
-    path = settings.base_dir / audio_file_path
-    if not path.is_file():
-        # Fall back to treating the value as an absolute/CWD-relative path.
-        path = settings.base_dir.joinpath(audio_file_path).resolve()
+    path = asset_path(settings.assets_dir, audio_file_path)  # by file name only: no path traversal
     if not path.is_file():
         raise FileNotFoundError(f"Audio file not found: {audio_file_path}")
 

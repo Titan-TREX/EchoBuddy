@@ -1,59 +1,64 @@
 """
-RAG context retrieval for EchoBuddy.
+RAG context retrieval.
 
-Given a natural-language query, this module performs a semantic similarity
-search over the ChromaDB vector store and returns the top-N most relevant
-document chunks as a formatted string.
+Given a natural-language query, runs a semantic similarity search over the
+requesting user's documents in ChromaDB (never anyone else's) and returns the
+most relevant chunks as one formatted string. `llm_stream.py` injects that
+string into the system prompt.
 
-Used exclusively by realtime/tools.py as the backend for the
-`search_documents` tool. The LLM (Groq) decides when to call this tool —
-the retriever itself is stateless and has no knowledge of the conversation.
+Stateless and synchronous (embedding + disk); async callers should use
+`asyncio.to_thread`. Never raises: any failure is logged and treated as "no
+context", so a broken vector store cannot take chat down.
 """
 
 from __future__ import annotations
 
 import logging
 
+from config.settings import settings
+from config.tracing import observe
+
 logger = logging.getLogger(__name__)
 
 
-def retrieve_context(query: str, n_results: int = 4) -> str:
+@observe(name="rag-retrieval", as_type="retriever")
+def retrieve_context(query: str, owner: str, n_results: int | None = None) -> str:
     """Semantic search over ingested documents.
 
     Args:
-        query:     The user's question or search query.
-        n_results: Number of top chunks to retrieve (default 4).
+        query:     The user's question.
+        owner:     Id of the user whose documents may be searched.
+        n_results: Max chunks to return (default `settings.rag_top_k`).
 
     Returns:
-        A formatted string of the most relevant document excerpts,
-        or an empty string if no documents have been ingested yet.
-        An empty string tells the LLM to answer from general knowledge.
+        Formatted excerpts of chunks closer than `settings.rag_max_distance`,
+        or "" if this user has uploaded nothing or nothing is relevant (which
+        tells the LLM to answer from general knowledge).
     """
     try:
-        from rag.ingestor import _get_collection  # lazy import to keep startup fast
+        from rag.ingestor import get_collection, has_docs  # lazy: keeps app startup fast
 
-        col = _get_collection()
-        if col.count() == 0:
-            return ""
+        if not owner or not has_docs(owner):
+            return ""  # nothing to search: skip embedding the query entirely
 
-        results = col.query(
+        results = get_collection().query(
             query_texts=[query],
-            n_results=min(n_results, col.count()),
+            n_results=n_results or settings.rag_top_k,
+            where={"owner": owner},
+            include=["documents", "metadatas", "distances"],
         )
 
-        chunks   = results["documents"][0]
-        metas    = results["metadatas"][0]
-
-        if not chunks:
-            return ""
-
         lines = []
-        for i, (chunk, meta) in enumerate(zip(chunks, metas), start=1):
-            source = meta.get("source", "unknown")
-            lines.append(f"[Document: {source} — excerpt {i}]\n{chunk}")
+        for chunk, meta, distance in zip(
+            results["documents"][0], results["metadatas"][0], results["distances"][0]
+        ):
+            if distance > settings.rag_max_distance:
+                continue
+            source = (meta or {}).get("source", "unknown")
+            lines.append(f"[Document: {source} — excerpt {len(lines) + 1}]\n{chunk}")
 
         return "\n\n".join(lines)
 
     except Exception:
-        logger.exception("RAG retrieval failed — returning empty context")
+        logger.exception("RAG retrieval failed - returning empty context")
         return ""

@@ -15,7 +15,6 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 from config.settings import Settings
 
@@ -36,11 +35,22 @@ class TestSettingsDefaults:
     def test_deepgram_language_default(self):
         assert self.s.deepgram_language == "en"
 
-    def test_gemini_model_default(self):
-        assert self.s.gemini_model == "llama-3.3-70b-versatile"
+    def test_groq_model_default(self):
+        assert self.s.groq_model == "openai/gpt-oss-120b"
 
-    def test_gemini_max_history_turns_default(self):
-        assert self.s.gemini_max_history_turns == 10
+    def test_history_max_turns_default(self):
+        assert self.s.history_max_turns == 10
+
+    def test_vad_frame_bytes_derived_from_rate_and_frame_ms(self):
+        # 16 kHz * 20 ms = 320 samples * 2 bytes
+        assert self.s.vad_frame_bytes == 640
+
+    def test_tunables_are_in_settings_not_hardcoded(self):
+        assert self.s.tts_sample_rate == 16000
+        assert self.s.web_search_max_results == 4
+        assert self.s.rag_top_k == 4
+        assert ".pdf" in self.s.allowed_doc_extensions
+        assert self.s.max_upload_bytes == self.s.max_upload_mb * 1024 * 1024
 
     def test_cartesia_model_default(self):
         assert self.s.cartesia_model == "sonic-2"
@@ -121,10 +131,29 @@ class TestSettingsEnvOverrides:
             s = Settings()
             assert s.temporal_task_queue == "custom-queue"
 
-    def test_override_gemini_max_history_turns(self):
-        with patch.dict(os.environ, {"GEMINI_MAX_HISTORY_TURNS": "5"}):
+    def test_override_history_max_turns(self):
+        with patch.dict(os.environ, {"HISTORY_MAX_TURNS": "5"}):
+            assert Settings().history_max_turns == 5
+
+    def test_legacy_gemini_env_names_still_work(self):
+        legacy = {"GEMINI_MAX_HISTORY_TURNS": "7", "GEMINI_MODEL": "some/model", "GEMINI_API_KEY": "k"}
+        with patch.dict(os.environ, legacy):
             s = Settings()
-            assert s.gemini_max_history_turns == 5
+            assert s.history_max_turns == 7
+            assert s.groq_model == "some/model"
+            assert s.groq_api_key == "k"
+
+    def test_new_groq_env_names_take_precedence(self):
+        with patch.dict(os.environ, {"GROQ_MODEL": "new/model", "GEMINI_MODEL": "old/model"}):
+            assert Settings().groq_model == "new/model"
+
+    def test_override_force_tool_keywords_from_json(self):
+        with patch.dict(os.environ, {"FORCE_TOOL_KEYWORDS": '["alpha", "beta"]'}):
+            assert Settings().force_tool_keywords == ["alpha", "beta"]
+
+    def test_missing_credentials_lists_unset_keys(self):
+        s = Settings(deepgram_api_key="", cartesia_api_key="x", groq_api_key="")
+        assert s.missing_credentials() == ["DEEPGRAM_API_KEY", "GROQ_API_KEY"]
 
     def test_override_activity_timeout(self):
         with patch.dict(os.environ, {"ACTIVITY_START_TO_CLOSE_TIMEOUT_SECONDS": "120"}):

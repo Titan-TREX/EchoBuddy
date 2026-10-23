@@ -22,11 +22,17 @@ import logging
 from deepgram import AsyncDeepgramClient
 
 from config.settings import settings
+from config.tracing import get_client, observe
 
 logger = logging.getLogger(__name__)
 
 
+@observe(name="stt-deepgram", capture_input=False)
 async def transcribe(wav_bytes: bytes) -> str:
+    get_client().update_current_span(
+        input={"audio_bytes": len(wav_bytes)},
+        metadata={"model": settings.deepgram_model, "language": settings.deepgram_language},
+    )
     client = AsyncDeepgramClient(api_key=settings.deepgram_api_key)
 
     response = await client.listen.v1.media.transcribe_file(

@@ -13,7 +13,6 @@ Covers:
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 import aiosqlite
 import pytest
@@ -65,7 +64,7 @@ def patched_connection(mem_db, monkeypatch):
         yield mem_db
 
     monkeypatch.setattr(
-        "temporal.activities.db_activity.get_connection", _fake_get_connection
+        "database.repository.get_connection", _fake_get_connection
     )
 
 

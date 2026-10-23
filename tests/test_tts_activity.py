@@ -4,7 +4,7 @@ Tests for temporal/activities/tts_activity.py
 Mocks `AsyncCartesia` to avoid real API calls. Covers:
   - Audio chunks (bytes) are written to a UUID-named .mp3 file.
   - Audio chunks in dict form ({"audio": bytes}) are handled.
-  - The returned path is relative to base_dir, not absolute.
+  - The returned reference is `assets/<name>`, not an absolute path.
   - The client is always closed (even on error).
   - Empty text still produces a file (zero-byte is fine for the test).
 """
@@ -12,8 +12,7 @@ Mocks `AsyncCartesia` to avoid real API calls. Covers:
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch, call
-import asyncio
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -48,7 +47,6 @@ class TestSynthesizeSpeech:
             mock_settings.cartesia_output_sample_rate = 44100
             mock_settings.cartesia_output_bit_rate = 128000
             mock_settings.assets_dir = assets_dir
-            mock_settings.base_dir = tmp_path
 
             inst = AsyncMock()
             inst.tts.bytes = AsyncMock(
@@ -79,7 +77,6 @@ class TestSynthesizeSpeech:
             mock_settings.cartesia_output_sample_rate = 44100
             mock_settings.cartesia_output_bit_rate = 128000
             mock_settings.assets_dir = assets_dir
-            mock_settings.base_dir = tmp_path
 
             inst = AsyncMock()
             inst.tts.bytes = AsyncMock(return_value=_async_gen(b"audio"))
@@ -108,7 +105,6 @@ class TestSynthesizeSpeech:
             mock_settings.cartesia_output_sample_rate = 44100
             mock_settings.cartesia_output_bit_rate = 128000
             mock_settings.assets_dir = assets_dir
-            mock_settings.base_dir = tmp_path
 
             inst = AsyncMock()
             inst.tts.bytes = AsyncMock(
@@ -139,7 +135,6 @@ class TestSynthesizeSpeech:
             mock_settings.cartesia_output_sample_rate = 44100
             mock_settings.cartesia_output_bit_rate = 128000
             mock_settings.assets_dir = assets_dir
-            mock_settings.base_dir = tmp_path
 
             inst = AsyncMock()
             inst.tts.bytes = AsyncMock(
@@ -170,7 +165,6 @@ class TestSynthesizeSpeech:
             mock_settings.cartesia_output_sample_rate = 44100
             mock_settings.cartesia_output_bit_rate = 128000
             mock_settings.assets_dir = assets_dir
-            mock_settings.base_dir = tmp_path
 
             async def mock_close():
                 close_called.append(True)
@@ -201,7 +195,6 @@ class TestSynthesizeSpeech:
             mock_settings.cartesia_output_sample_rate = 44100
             mock_settings.cartesia_output_bit_rate = 128000
             mock_settings.assets_dir = assets_dir
-            mock_settings.base_dir = tmp_path
 
             inst = AsyncMock()
             inst.tts.bytes = AsyncMock(return_value=_async_gen(b"a"))

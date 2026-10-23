@@ -18,11 +18,11 @@ import logging
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-from config.settings import settings
+from config.settings import configure_logging, settings
 from temporal.activities import ALL_ACTIVITIES
 from temporal.workflows import VoiceChatbotWorkflow
 
-logging.basicConfig(level=logging.INFO)
+configure_logging()
 logger = logging.getLogger(__name__)
 
 

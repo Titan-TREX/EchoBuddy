@@ -31,6 +31,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.append(str(_PROJECT_ROOT))
 
 from config.settings import settings  # noqa: E402
+from core.assets import asset_path, asset_ref  # noqa: E402
 from temporal.dto import VoiceChatbotInput, VoiceChatbotResult  # noqa: E402
 from temporal.workflows import VoiceChatbotWorkflow  # noqa: E402
 
@@ -52,13 +53,13 @@ def _save_recording(audio_value) -> str:
     """Persist a recorded clip to `assets/` with a UUID filename.
 
     Returns:
-        The new file's path, relative to the project root, suitable for
+        The new file's `assets/<name>` reference, suitable for
         passing straight into `VoiceChatbotInput.input_audio_path`.
     """
     filename = f"usr_{uuid.uuid4().hex[:8]}.wav"
     output_path = settings.assets_dir / filename
     output_path.write_bytes(audio_value.getvalue())
-    return output_path.relative_to(settings.base_dir).as_posix()
+    return asset_ref(output_path)
 
 
 async def _run_workflow(audio_path: str) -> VoiceChatbotResult:
@@ -87,7 +88,7 @@ def _render_message(message: dict) -> None:
         st.write(message["text"])
         audio_path = message.get("audio_path")
         if audio_path:
-            audio_full_path = settings.base_dir / audio_path
+            audio_full_path = asset_path(settings.assets_dir, audio_path)
             if audio_full_path.exists():
                 st.audio(str(audio_full_path), autoplay=message.get("autoplay", False))
 

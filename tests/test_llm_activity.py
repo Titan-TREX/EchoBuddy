@@ -1,225 +1,167 @@
 """
-Tests for temporal/activities/llm_activity.py
+Tests for temporal/activities/llm_activity.py (the batch pipeline's LLM step).
 
-Mocks the Langfuse-wrapped `AsyncOpenAI` (OpenRouter) so no real API calls are made. Verifies:
-  - Correct message list is assembled from history + current utterance.
-  - LLMResult.text is taken from response.choices[0].message.content.
-  - Fallback reply is returned when the API returns empty content.
-  - History is capped at `gemini_max_history_turns`.
+The OpenRouter client is replaced by a fake, so there are no network calls. Covers:
+message assembly (system prompt, history cap, user last), tool calling, answers from
+the user's own documents, graceful fallbacks, and that the asking user's id reaches
+the document search.
 """
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from types import SimpleNamespace as NS
 
 import pytest
 
+from config.settings import settings
+from core import prompting, tool_loop
+from temporal.activities import llm_activity
 from temporal.dto import ConversationTurn, LLMResult
 
-_MODULE = "temporal.activities.llm_activity"
+OWNER = "owner-aaaa1111"
 
 
-def _make_response(content: str) -> MagicMock:
-    """Build a minimal mock that looks like a chat completion response."""
-    choice = MagicMock()
-    choice.message.content = content
-    response = MagicMock()
-    response.choices = [choice]
-    return response
+def _choice(content: str | None = "", tool_calls=None) -> NS:
+    return NS(
+        finish_reason="tool_calls" if tool_calls else "stop",
+        message=NS(content=content, tool_calls=tool_calls),
+    )
 
 
-# ---------------------------------------------------------------------------
-# generate_reply – happy path
-# ---------------------------------------------------------------------------
+class FakeClient:
+    """Stand-in for the OpenAI-style client; replays queued responses and records requests."""
 
-class TestGenerateReply:
+    def __init__(self, *responses):
+        self.responses = list(responses)
+        self.requests: list[dict] = []
+        self.chat = NS(completions=NS(create=self._create))
+
+    async def _create(self, **kwargs):
+        self.requests.append(kwargs)
+        item = self.responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return NS(choices=[item])
+
+
+@pytest.fixture
+def run(monkeypatch):
+    """Run generate_reply against queued fake responses; returns (result, client)."""
+    monkeypatch.setattr(prompting, "retrieve_context", lambda _q, _o: "")
+
+    async def _run(*responses, user_text="Tell me something", history=None, owner=OWNER):
+        client = FakeClient(*responses)
+        monkeypatch.setattr(llm_activity, "AsyncOpenAI", lambda **_kw: client)
+        result = await llm_activity.generate_reply(user_text, history or [], owner)
+        return result, client
+
+    return _run
+
+
+class TestMessages:
     @pytest.mark.asyncio
-    async def test_returns_llm_result(self):
-        mock_response = _make_response("Hello from the bot!")
-
-        with (
-            patch(f"{_MODULE}.AsyncOpenAI") as MockClient,
-            patch(f"{_MODULE}.settings") as mock_settings,
-        ):
-            mock_settings.openrouter_api_key = "test-key"
-            mock_settings.openrouter_model = "meta-llama/llama-3.3-70b-instruct"
-            mock_settings.openrouter_base_url = "https://openrouter.ai/api/v1"
-            mock_settings.gemini_max_history_turns = 10
-
-            instance = AsyncMock()
-            instance.chat.completions.create = AsyncMock(return_value=mock_response)
-            MockClient.return_value = instance
-
-            from temporal.activities.llm_activity import generate_reply
-
-            result = await generate_reply("What time is it?", [])
-
-        assert isinstance(result, LLMResult)
-        assert result.text == "Hello from the bot!"
-
-    @pytest.mark.asyncio
-    async def test_appends_user_utterance_as_last_message(self):
-        mock_response = _make_response("Sure!")
-        captured_messages: list = []
-
-        async def capture_create(**kwargs):
-            captured_messages.extend(kwargs.get("messages", []))
-            return mock_response
-
-        with (
-            patch(f"{_MODULE}.AsyncOpenAI") as MockClient,
-            patch(f"{_MODULE}.settings") as mock_settings,
-        ):
-            mock_settings.openrouter_api_key = "test-key"
-            mock_settings.openrouter_model = "meta-llama/llama-3.3-70b-instruct"
-            mock_settings.openrouter_base_url = "https://openrouter.ai/api/v1"
-            mock_settings.gemini_max_history_turns = 10
-
-            instance = AsyncMock()
-            instance.chat.completions.create = capture_create
-            MockClient.return_value = instance
-
-            from temporal.activities.llm_activity import generate_reply
-            await generate_reply("My question", [])
-
-        assert captured_messages[-1] == {"role": "user", "content": "My question"}
-
-    @pytest.mark.asyncio
-    async def test_history_converted_to_message_dicts(self):
-        mock_response = _make_response("Got it")
-        captured: list = []
-
-        async def capture(**kwargs):
-            captured.extend(kwargs["messages"])
-            return mock_response
-
+    async def test_system_prompt_history_then_user(self, run):
         history = [
             ConversationTurn(role="user", content="Hi"),
             ConversationTurn(role="assistant", content="Hello!"),
         ]
+        _, client = await run(_choice("Sure."), user_text="Next question", history=history)
 
-        with (
-            patch(f"{_MODULE}.AsyncOpenAI") as MockClient,
-            patch(f"{_MODULE}.settings") as mock_settings,
-        ):
-            mock_settings.openrouter_api_key = "k"
-            mock_settings.openrouter_model = "meta-llama/llama-3.3-70b-instruct"
-            mock_settings.openrouter_base_url = "https://openrouter.ai/api/v1"
-            mock_settings.gemini_max_history_turns = 10
-
-            inst = AsyncMock()
-            inst.chat.completions.create = capture
-            MockClient.return_value = inst
-
-            from temporal.activities.llm_activity import generate_reply
-            await generate_reply("Next question", history)
-
-        assert captured[0] == {"role": "user", "content": "Hi"}
-        assert captured[1] == {"role": "assistant", "content": "Hello!"}
-        assert captured[2] == {"role": "user", "content": "Next question"}
+        assert client.requests[0]["messages"] == [
+            {"role": "system", "content": settings.system_prompt},
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello!"},
+            {"role": "user", "content": "Next question"},
+        ]
 
     @pytest.mark.asyncio
-    async def test_history_capped_at_max_turns(self):
-        mock_response = _make_response("Sure")
-        captured: list = []
-
-        async def capture(**kwargs):
-            captured.extend(kwargs["messages"])
-            return mock_response
-
-        # 15 turns in history, max is 5
+    async def test_history_is_capped(self, run, monkeypatch):
+        monkeypatch.setattr(settings, "history_max_turns", 5)
         history = [
             ConversationTurn(role="user" if i % 2 == 0 else "assistant", content=f"msg {i}")
             for i in range(15)
         ]
+        _, client = await run(_choice("Sure."), history=history)
 
-        with (
-            patch(f"{_MODULE}.AsyncOpenAI") as MockClient,
-            patch(f"{_MODULE}.settings") as mock_settings,
-        ):
-            mock_settings.openrouter_api_key = "k"
-            mock_settings.openrouter_model = "meta-llama/llama-3.3-70b-instruct"
-            mock_settings.openrouter_base_url = "https://openrouter.ai/api/v1"
-            mock_settings.gemini_max_history_turns = 5
-
-            inst = AsyncMock()
-            inst.chat.completions.create = capture
-            MockClient.return_value = inst
-
-            from temporal.activities.llm_activity import generate_reply
-            await generate_reply("new question", history)
-
-        # 5 history messages + 1 current utterance = 6 total
-        assert len(captured) == 6
-
-
-# ---------------------------------------------------------------------------
-# generate_reply – fallback / edge cases
-# ---------------------------------------------------------------------------
-
-class TestGenerateReplyFallback:
-    @pytest.mark.asyncio
-    async def test_returns_fallback_on_empty_content(self):
-        mock_response = _make_response("")  # empty string → fallback
-
-        with (
-            patch(f"{_MODULE}.AsyncOpenAI") as MockClient,
-            patch(f"{_MODULE}.settings") as mock_settings,
-        ):
-            mock_settings.openrouter_api_key = "k"
-            mock_settings.openrouter_model = "meta-llama/llama-3.3-70b-instruct"
-            mock_settings.openrouter_base_url = "https://openrouter.ai/api/v1"
-            mock_settings.gemini_max_history_turns = 10
-
-            inst = AsyncMock()
-            inst.chat.completions.create = AsyncMock(return_value=mock_response)
-            MockClient.return_value = inst
-
-            from temporal.activities.llm_activity import generate_reply, _FALLBACK_REPLY
-            result = await generate_reply("...", [])
-
-        assert result.text == _FALLBACK_REPLY
+        messages = client.requests[0]["messages"]
+        assert len(messages) == 7                      # system + 5 history + current
+        assert messages[1]["content"] == "msg 10"      # the most recent 5 are kept
 
     @pytest.mark.asyncio
-    async def test_returns_fallback_on_none_content(self):
-        mock_response = _make_response(None)  # type: ignore[arg-type]
+    async def test_uses_the_configured_model_and_tools(self, run):
+        _, client = await run(_choice("Sure."))
+        assert client.requests[0]["model"] == settings.openrouter_model
+        assert client.requests[0]["tools"]
 
-        with (
-            patch(f"{_MODULE}.AsyncOpenAI") as MockClient,
-            patch(f"{_MODULE}.settings") as mock_settings,
-        ):
-            mock_settings.openrouter_api_key = "k"
-            mock_settings.openrouter_model = "meta-llama/llama-3.3-70b-instruct"
-            mock_settings.openrouter_base_url = "https://openrouter.ai/api/v1"
-            mock_settings.gemini_max_history_turns = 10
 
-            inst = AsyncMock()
-            inst.chat.completions.create = AsyncMock(return_value=mock_response)
-            MockClient.return_value = inst
-
-            from temporal.activities.llm_activity import generate_reply, _FALLBACK_REPLY
-            result = await generate_reply("...", [])
-
-        assert result.text == _FALLBACK_REPLY
+class TestReplies:
+    @pytest.mark.asyncio
+    async def test_direct_answer_needs_only_one_call(self, run):
+        result, client = await run(_choice("  Hello from the bot!  "))
+        assert result == LLMResult(text="Hello from the bot!")
+        assert len(client.requests) == 1
 
     @pytest.mark.asyncio
-    async def test_whitespace_only_reply_returns_fallback(self):
-        mock_response = _make_response("   ")  # whitespace → stripped to "" → fallback
+    async def test_tool_call_result_feeds_a_final_answer(self, run, monkeypatch):
+        calls = []
 
-        with (
-            patch(f"{_MODULE}.AsyncOpenAI") as MockClient,
-            patch(f"{_MODULE}.settings") as mock_settings,
-        ):
-            mock_settings.openrouter_api_key = "k"
-            mock_settings.openrouter_model = "meta-llama/llama-3.3-70b-instruct"
-            mock_settings.openrouter_base_url = "https://openrouter.ai/api/v1"
-            mock_settings.gemini_max_history_turns = 10
+        async def fake_run_tool(name, arguments):
+            calls.append((name, arguments))
+            return "12 * 7 = 84"
 
-            inst = AsyncMock()
-            inst.chat.completions.create = AsyncMock(return_value=mock_response)
-            MockClient.return_value = inst
+        monkeypatch.setattr(tool_loop, "run_tool", fake_run_tool)
+        tool_call = NS(id="call_1", function=NS(name="calculator", arguments='{"expression": "12*7"}'))
 
-            from temporal.activities.llm_activity import generate_reply, _FALLBACK_REPLY
-            result = await generate_reply("...", [])
+        result, client = await run(
+            _choice(None, [tool_call]), _choice("It is 84."), user_text="what is 12 times 7"
+        )
 
-        assert result.text == _FALLBACK_REPLY
+        assert calls == [("calculator", '{"expression": "12*7"}')]
+        assert result.text == "It is 84."
+        final_messages = client.requests[-1]["messages"]
+        assert final_messages[-1] == {"role": "tool", "tool_call_id": "call_1", "content": "12 * 7 = 84"}
+        assert "tools" not in client.requests[-1]      # the final call answers, it doesn't call tools again
+
+    @pytest.mark.asyncio
+    async def test_time_sensitive_question_forces_a_tool(self, run):
+        _, client = await run(_choice("Sunny."), user_text="What's the weather today?")
+        assert client.requests[0]["tool_choice"] == "required"
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_a_plain_answer_when_the_tool_pass_fails(self, run):
+        result, client = await run(RuntimeError("tool_use_failed"), _choice("Plain answer."))
+        assert result.text == "Plain answer."
+        assert "tools" not in client.requests[-1]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("content", ["", None, "   "])
+    async def test_empty_model_reply_returns_the_fallback(self, run, content):
+        result, _ = await run(_choice(content), _choice(content))
+        assert result.text == settings.fallback_reply
+
+
+class TestDocuments:
+    @pytest.mark.asyncio
+    async def test_the_askers_documents_are_searched_and_injected(self, monkeypatch):
+        seen = []
+
+        def fake_retrieve(query, owner):
+            seen.append((query, owner))
+            return "[Document: memo.txt — excerpt 1]\nThe vault code is 7351."
+
+        monkeypatch.setattr(prompting, "retrieve_context", fake_retrieve)
+        client = FakeClient(_choice("7351."))
+        monkeypatch.setattr(llm_activity, "AsyncOpenAI", lambda **_kw: client)
+
+        await llm_activity.generate_reply("what is the vault code", [], OWNER)
+
+        assert seen == [("what is the vault code", OWNER)]
+        system = client.requests[0]["messages"][0]["content"]
+        assert system.startswith(settings.system_prompt)
+        assert "vault code is 7351" in system
+
+    @pytest.mark.asyncio
+    async def test_no_owner_means_no_document_search_results(self, run, monkeypatch):
+        # retrieve_context itself returns "" for an empty owner; the activity must not crash.
+        result, _ = await run(_choice("Fine."), owner="")
+        assert result.text == "Fine."

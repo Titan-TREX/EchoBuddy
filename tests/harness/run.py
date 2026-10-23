@@ -12,7 +12,6 @@ Usage (from the project root):
 from __future__ import annotations
 
 import argparse
-import asyncio
 import re
 import sys
 
