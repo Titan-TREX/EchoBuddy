@@ -219,9 +219,26 @@
     color: var(--text-dim);
     margin-top: 2px;
   }
+
+  #uploadToast {
+    display: none; position: fixed; top: 18px; left: 50%;
+    transform: translateX(-50%);
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 10px 20px;
+    font-size: 0.82rem; color: var(--text); z-index: 9999;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    white-space: nowrap; pointer-events: none;
+  }
+  .icon-btn.plus {
+    background: transparent; border: 1.5px solid var(--border); flex-shrink: 0;
+  }
+  .icon-btn.plus:hover { background: var(--panel-2); border-color: #555; }
 </style>
 </head>
 <body>
+
+<input type="file" id="docInput" accept=".pdf,.txt" style="display:none;" />
+<div id="uploadToast"></div>
 
 <div class="topbar">
   <div class="title">
@@ -246,8 +263,17 @@
       <span id="statusText">Ready</span>
     </div>
 
-    <div class="input-bar">
-      <input type="text" id="textInput" placeholder="Ask anything" disabled />
+    <div class="input-bar" style="padding-left:10px;">
+      <button class="icon-btn plus" id="plusBtn" title="Upload PDF or TXT"
+              onclick="document.getElementById('docInput').click()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+             stroke-linecap="round" stroke-linejoin="round">
+          <line x1="12" y1="5" x2="12" y2="19"/>
+          <line x1="5"  y1="12" x2="19" y2="12"/>
+        </svg>
+      </button>
+
+      <input type="text" id="textInput" placeholder="Ask anything, or upload a file with +" />
 
       <!-- Mic: click once to start recording, click again to stop + send (batch/Temporal pipeline) -->
       <button class="icon-btn mic" id="micBtn" title="Record a message">
@@ -272,7 +298,7 @@
       </button>
     </div>
 
-    <div class="hint" id="hint">Mic = record one message · Waveform = continuous live conversation</div>
+    <div class="hint" id="hint">+ = upload PDF/TXT · Type + Enter = text chat · 🎤 = record · 〜 = live mode</div>
   </div>
 </div>
 
@@ -607,6 +633,105 @@ realtimeBtn.addEventListener("click", async () => {
     stopRealtime();
   }
 });
+
+/* =========================================================================
+   TEXT CHAT — type message, press Enter
+   POST /api/text-chat -> { bot_text, bot_audio_path, session_id }
+   ========================================================================= */
+let textSessionId = crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
+
+// FIX: use getElementById — textInput was not in the original const list
+document.getElementById("textInput").addEventListener("keydown", function(e) {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    sendTextMessage();
+  }
+});
+
+async function sendTextMessage() {
+  const input = document.getElementById("textInput");
+  const text  = input.value.trim();
+  if (!text || isRecording || realtimeActive) return;
+
+  input.value = "";
+  addUserBubble(text);
+  setStatus("Thinking…", "thinking", "Processing");
+  micBtn.disabled      = true;
+  realtimeBtn.disabled = true;
+
+  try {
+    const res = await fetch("/api/text-chat", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ text, user_id: tempUserId, session_id: textSessionId }),
+    });
+    if (!res.ok) throw new Error("Server " + res.status);
+    const data = await res.json();
+
+    if (data.session_id) textSessionId = data.session_id;
+
+    const botBubble = addBotBubble();
+    botBubble.textContent = data.bot_text || "";
+    if (data.bot_audio_path) {
+      const audio = document.createElement("audio");
+      audio.controls = true; audio.autoplay = true;
+      audio.src = data.bot_audio_path;
+      botBubble.appendChild(document.createElement("br"));
+      botBubble.appendChild(audio);
+    }
+    scrollToBottom();
+    setStatus("Ready", "", "Idle");
+  } catch (err) {
+    addBotBubble().textContent = "⚠️ " + err.message;
+    setStatus("Error", "", "Error");
+  } finally {
+    micBtn.disabled      = false;
+    realtimeBtn.disabled = false;
+  }
+}
+
+/* =========================================================================
+   DOCUMENT UPLOAD — + button -> hidden file input -> auto upload
+   POST /api/upload-doc -> { success, file, chunks_added }
+   ========================================================================= */
+let toastTimer;
+
+function showToast(msg, duration) {
+  duration = duration || 4000;
+  const t = document.getElementById("uploadToast");
+  t.textContent    = msg;
+  t.style.display  = "block";
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(function() { t.style.display = "none"; }, duration);
+}
+
+document.getElementById("docInput").addEventListener("change", async function() {
+  const file    = this.files[0];
+  const plusBtn = document.getElementById("plusBtn");
+  if (!file) return;
+
+  plusBtn.disabled = true;
+  showToast("⏳ Uploading “" + file.name + "”…", 60000);
+
+  const form = new FormData();
+  form.append("file", file);
+
+  try {
+    const res  = await fetch("/api/upload-doc", { method: "POST", body: form });
+    const data = await res.json();
+    if (data.success) {
+      showToast("✅ " + data.chunks_added + " chunks added from “" + data.file + "”");
+    } else {
+      showToast("❌ " + (data.error || "Upload failed"));
+    }
+  } catch (err) {
+    showToast("❌ Upload error: " + err.message);
+  } finally {
+    plusBtn.disabled = false;
+    this.value = "";
+  }
+});
+
 </script>
 </body>
 </html>

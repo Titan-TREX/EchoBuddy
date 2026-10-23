@@ -25,9 +25,12 @@ Then open http://localhost:8000
 from __future__ import annotations
 
 import audioop
+import io
 import logging
+import shutil
 import sys
 import uuid
+import wave
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
@@ -41,7 +44,13 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.append(str(_PROJECT_ROOT))
 
 from config.settings import settings  # noqa: E402
+from rag.ingestor import ingest_file, list_docs, delete_doc  # noqa: E402
 from realtime.session import VoiceSession  # noqa: E402
+
+# ── Uploaded documents directory ──────────────────────────────────────────────
+_UPLOAD_DIR = _PROJECT_ROOT / "uploaded_docs"
+_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+# ─────────────────────────────────────────────────────────────────────────────
 from temporal.dto import VoiceChatbotInput, VoiceChatbotResult  # noqa: E402
 from temporal.workflows import VoiceChatbotWorkflow  # noqa: E402
 
@@ -171,8 +180,10 @@ async def voice_ws(websocket: WebSocket) -> None:
         await send_json({"type": "ready"})
 
         while True:
-            message = await websocket.receive()
-
+            try:
+                message = await websocket.receive()
+            except RuntimeError:
+                break  # client disconnected mid-stream, exit cleanly
             if message.get("bytes") is not None:
                 raw = message["bytes"]
                 if source_rate != 16000:
@@ -190,3 +201,115 @@ async def voice_ws(websocket: WebSocket) -> None:
     finally:
         if session.gen_task and not session.gen_task.done():
             session.gen_task.cancel()
+
+# =============================================================================
+# RAG — Document upload & management
+# =============================================================================
+
+@app.post("/api/upload-doc")
+async def upload_document(file: UploadFile = File(...)) -> JSONResponse:
+    """Accept a PDF or TXT file, save it, and ingest into ChromaDB.
+
+    The ingested content becomes available to Groq as the 
+    tool — no changes to llm_stream.py or llm_activity.py needed.
+    """
+    allowed = {".pdf", ".txt"}
+    suffix  = Path(file.filename or "").suffix.lower()
+
+    if suffix not in allowed:
+        return JSONResponse(
+            {"error": f"Unsupported file type '{suffix}'. Only PDF and TXT allowed."},
+            status_code=400,
+        )
+
+    save_path = _UPLOAD_DIR / (file.filename or f"doc_{uuid.uuid4().hex[:8]}{suffix}")
+    with open(save_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    try:
+        result = ingest_file(str(save_path))
+        return JSONResponse({"success": True, **result})
+    except Exception as exc:
+        logger.exception("Ingestion failed for %s", file.filename)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.get("/api/docs")
+async def get_docs() -> JSONResponse:
+    """Return a list of all ingested document filenames."""
+    return JSONResponse({"documents": list_docs()})
+
+
+@app.delete("/api/docs/{filename}")
+async def remove_doc(filename: str) -> JSONResponse:
+    """Delete all ChromaDB chunks for a specific document."""
+    deleted = delete_doc(filename)
+    return JSONResponse({"deleted_chunks": deleted, "file": filename})
+
+
+# =============================================================================
+# Text chat — type a message, get a text + audio reply
+# =============================================================================
+
+from pydantic import BaseModel  # noqa: E402
+
+
+class TextChatRequest(BaseModel):
+    text:       str
+    user_id:    str = ""
+    session_id: str = ""
+
+
+@app.post("/api/text-chat")
+async def text_chat(req: TextChatRequest) -> JSONResponse:
+    """Text-in, text+audio-out endpoint.
+
+    Uses the same realtime pipeline (llm_stream + tts_stream) so the RAG
+    search_documents tool is automatically available here too.
+    The reply audio is saved as a WAV file and its URL is returned alongside
+    the text so the browser can autoplay it.
+    """
+    from realtime.db import (  # noqa: E402
+        ensure_user_and_session,
+        fetch_recent_history,
+        log_message,
+    )
+    from realtime.llm_stream import stream_reply_chunks  # noqa: E402
+    from realtime.tts_stream import stream_speech_chunks  # noqa: E402
+
+    user_id    = req.user_id    or f"user_{uuid.uuid4().hex[:8]}"
+    session_id = req.session_id or str(uuid.uuid4())
+
+    await ensure_user_and_session(user_id, session_id, user_id)
+    history = await fetch_recent_history(session_id, 10)
+    await log_message(session_id, "user", req.text, None)
+
+    # ── Collect full LLM reply ────────────────────────────────────────────
+    full_text = ""
+    async for _sentence, accumulated in stream_reply_chunks(req.text, history):
+        full_text = accumulated
+
+    # ── Synthesize reply to WAV ───────────────────────────────────────────
+    pcm_chunks: list[bytes] = []
+    async for chunk in stream_speech_chunks(full_text):
+        pcm_chunks.append(chunk)
+
+    audio_filename = f"bot_{uuid.uuid4().hex[:8]}.wav"
+    audio_path     = settings.assets_dir / audio_filename
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(b"".join(pcm_chunks))
+    audio_path.write_bytes(buf.getvalue())
+
+    rel = audio_path.relative_to(settings.base_dir).as_posix()
+    await log_message(session_id, "assistant", full_text, rel)
+
+    return JSONResponse({
+        "bot_text":       full_text,
+        "bot_audio_path": f"/{rel}",
+        "user_id":        user_id,
+        "session_id":     session_id,
+    })
