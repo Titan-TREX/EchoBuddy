@@ -66,3 +66,27 @@ def test_a_production_build_without_a_url_fails_loudly(tmp_path):
     assert result.returncode != 0
     assert "API_BASE_URL" in result.stderr
     assert not (tmp_path / "dist").exists()
+
+
+class TestExplicitNoBackendOptIn:
+    def test_production_build_passes_only_with_the_explicit_opt_in(self, tmp_path):
+        result = _build(tmp_path, VERCEL_ENV="production", ALLOW_NO_BACKEND="1")
+        assert result.returncode == 0, result.stderr
+        assert _api_base(tmp_path) == ""
+
+    @pytest.mark.parametrize("value", ["0", "", "true", "yes"])
+    def test_anything_other_than_1_keeps_the_guard_on(self, tmp_path, value):
+        assert _build(tmp_path, VERCEL_ENV="production", ALLOW_NO_BACKEND=value).returncode != 0
+
+    def test_a_real_backend_url_still_wins_over_the_opt_in(self, tmp_path):
+        result = _build(
+            tmp_path, VERCEL_ENV="production", ALLOW_NO_BACKEND="1", API_BASE_URL="https://api.example.com"
+        )
+        assert result.returncode == 0, result.stderr
+        assert _api_base(tmp_path) == "https://api.example.com"
+
+
+def test_the_page_checks_for_a_backend_and_says_so_when_there_is_none():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    assert "checkBackend" in html
+    assert "No backend connected" in html

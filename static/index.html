@@ -328,6 +328,17 @@ function setToken(token) {
   } catch (e) { /* storage unavailable: token just won't persist */ }
 }
 
+/* If this page is hosted without a backend (e.g. on Vercel before the API exists), say so up
+   front instead of failing mysteriously on the first click. A 503 still means "backend exists". */
+(async function checkBackend() {
+  try {
+    const res = await fetch(apiUrl("/health"));
+    if (res.status !== 404) return;
+  } catch (e) { /* network error: backend unreachable */ }
+  setStatus("No backend connected", "", "Offline");
+  showToast("⚠️ No backend is connected to this page yet, so chat, voice and upload will not work.", 20000);
+})();
+
 /* Per-browser identity. It is kept across reloads and owns the documents this browser
    uploads, so it is long and random (128 bits) rather than guessable. */
 const USER_ID_KEY = "echobuddy_user_id";

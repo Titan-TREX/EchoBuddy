@@ -9,6 +9,8 @@
 //
 // A production build without API_BASE_URL fails on purpose: it would ship a page that
 // calls itself and 404s on every request. Preview builds may omit it (same-origin).
+// To publish the page BEFORE a backend exists, set ALLOW_NO_BACKEND=1 (an explicit opt-in);
+// the page then tells visitors that no backend is connected.
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -25,10 +27,13 @@ function fail(message) {
 let apiBase = (process.env.API_BASE_URL || "").trim().replace(/\/+$/, "");
 
 if (!apiBase) {
-  if (process.env.VERCEL_ENV === "production") {
-    fail("API_BASE_URL is not set. Set it to your backend's public https URL (no trailing path).");
+  if (process.env.VERCEL_ENV === "production" && process.env.ALLOW_NO_BACKEND !== "1") {
+    fail(
+      "API_BASE_URL is not set. Set it to your backend's public https URL (no trailing path), " +
+        "or set ALLOW_NO_BACKEND=1 to publish the page without a backend on purpose."
+    );
   }
-  console.warn("build.mjs: API_BASE_URL not set; the page will call its own origin.");
+  console.warn("build.mjs: API_BASE_URL not set; the page will call its own origin (no backend).");
 } else {
   let url;
   try {
